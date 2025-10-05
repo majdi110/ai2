@@ -2,13 +2,7 @@
   "name": "ai2-app",
   "version": "1.0.1",
   "private": true,
-  "description": "AI2 minimal Node app for Passenger (no external deps)",
   "main": "server.js",
-  "scripts": {
-    "start": "node server.js",
-    "health": "PORT=4010 node server.js & pid=$!; sleep 1; curl -sS http://127.0.0.1:4010/ai2/health; kill $pid"
-  },
-  "engines": {
-    "node": ">=16"
-  }
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=16" }
 }

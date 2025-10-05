@@ -1,0 +1,6 @@
+PassengerEnabled on
+PassengerAppType node
+PassengerStartupFile server.js
+PassengerFriendlyErrorPages on
+PassengerNodejs /home/genweb/.nvm/versions/node/v16.20.2/bin/node
+Options -MultiViews

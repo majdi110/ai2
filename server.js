@@ -1,2 +1,2 @@
-// Minimal Passenger entry: just boot the HTTP server from app.js
+// Minimal Passenger entry
 require('./app');
