@@ -1,2 +1,2 @@
-'use strict';
-require('./app.js');
+// Minimal Passenger entry: just boot the HTTP server from app.js
+require('./app');
