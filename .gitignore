@@ -18,3 +18,10 @@
 .DS_Store
 Thumbs.db
 *.swp
+node_modules/
+npm-debug.log*
+yarn-error.log*
+tmp/*
+!tmp/restart.txt
+.DS_Store
+.env
