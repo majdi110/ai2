@@ -40,7 +40,7 @@ const VERSION_FILE = path.join(__dirname, 'VERSION.txt');
 const MAX_BYTES    = 512 * 1024;
 
 // Repo browsing config
-const REPO_ROOT      = '/home/genweb/public_html/datav.repo';
+const REPO_ROOT      = '/home/genweb/public_html/datav.belocloud.com/ai2';
 const LIST_MAX_DEPTH = 3;
 const GET_MAX_BYTES  = 256 * 1024;
 const HIDDEN_DIRS = new Set(['.git','node_modules','.cache','.cpanel','.trash']);
@@ -418,14 +418,15 @@ function handler(req, res) {
     return handleDiffDryrun(req, res);
 
   // repo browsing (auth required)
-  if (req.method === 'GET' && (p === '/ai2/repo/list' || p === '/repo/list' || p === '/ai2/fs/list' || p === '/fs/list'))
+if (req.method === 'GET' && (p === '/ai2/repo/list' || p === '/repo/list' || p === '/ai2/fs/list' || p === '/fs/list' || p === '/ai2/list'))
+
     return handleRepoList(req, res);
   if (req.method === 'GET' && (p === '/ai2/repo/get'  || p === '/repo/get'  || p === '/ai2/fs/get'  || p === '/fs/get'))
     return handleRepoGet(req, res);
 
   // root banner
   if (req.method === 'GET' && (p === '/ai2/' || p === '/'))
-    return sendText(res, 200, 'AppJS ACTIVE\n');
+    return sendText(res, 200, 'OK (ai2)\n');
 
   // fallback
   return sendText(res, 404, 'Not Found\n');
