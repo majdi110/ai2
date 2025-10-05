@@ -3,22 +3,24 @@
 /**
  * BeloCloud Actions mini-server (no external deps).
  *
- * Endpoints (public):
- *   GET  /ai2/                 -> "AppJS ACTIVE"
- *   GET  /ai2/_health          -> { ok:true, time }
- *   GET  /ai2/health           -> alias of /ai2/_health
- *   GET  /ai2/version          -> { ok:true, version }
- *   GET  /ai2/static/<file>    -> serve ./public/<file> (json/text only)
- *   POST /ai2/echo             -> debug echo; shows headers/body + decoded preview
+ * Public:
+ *   GET  /ai2/                   -> "OK (ai2)"
+ *   GET  /ai2/_health            -> { ok:true, time }
+ *   GET  /ai2/health             -> alias of /ai2/_health
+ *   GET  /ai2/version            -> { ok:true, version }
+ *   GET  /ai2/static/<file>      -> serve ./public/<file> (json/text/log only)
+ *   GET  /ai2/debug              -> debug info (node version, env)
+ *   POST /ai2/echo               -> debug echo; shows headers/body + decoded preview
  *
- * Endpoints (actions, write):
- *   POST /ai2/diff_submit      -> enqueue a Base64 (or base64url) unified diff
- *   POST /ai2/diff_dryrun      -> git-apply --check (no enqueue), against origin/<base_branch>
+ * Actions (write):
+ *   POST /ai2/diff_submit        -> enqueue a Base64/base64url unified diff
+ *   POST /ai2/diff_dryrun        -> git-apply --check (no enqueue), against origin/<base_branch>
  *
- * Endpoints (repo browsing, read-only; require token):
- *   GET  /ai2/repo/list?path=&depth=          -> JSON list
- *   GET  /ai2/repo/get?path=relative/path     -> JSON {content_b64,...}
- *   Aliases without /ai2 prefix are also available: /repo/list, /repo/get
+ * Repo browsing (read-only; require token):
+ *   GET  /ai2/repo/list?path=&depth=
+ *   GET  /ai2/repo/get?path=relative/path
+ *   Aliases: /repo/list, /repo/get, /ai2/fs/list, /ai2/fs/get, /fs/list, /fs/get
+ *   Short aliases (for docs): /ai2/list, /ai2/get
  */
 
 const http   = require('http');
@@ -30,28 +32,43 @@ const url    = require('url');
 const os     = require('os');
 const { execFile } = require('child_process');
 
-// --- config/paths ---
+// ----- config -----
+const BASE_URI     = '/ai2';
+
 const TOKEN_FILE   = '/home/genweb/agent/ACTION_TOKEN';
 const QUEUE_DIR    = '/home/genweb/agent/queue';
 const IDEM_DIR     = QUEUE_DIR; // idempotency markers alongside jobs
 const DEBUG_LOG    = '/home/genweb/agent/last_action_debug.log';
+
 const STATIC_ROOT  = path.join(__dirname, 'public');
 const VERSION_FILE = path.join(__dirname, 'VERSION.txt');
 const MAX_BYTES    = 512 * 1024;
 
-// Repo browsing config
+// Active repo path (this app’s own repo)
 const REPO_ROOT      = '/home/genweb/public_html/datav.belocloud.com/ai2';
 const LIST_MAX_DEPTH = 3;
 const GET_MAX_BYTES  = 256 * 1024;
-const HIDDEN_DIRS = new Set(['.git','node_modules','.cache','.cpanel','.trash']);
-const HIDDEN_TOP  = new Set(['.git','node_modules','.env']);
 
-// --- state/init ---
-let ACTION_TOKEN = '';
-try { ACTION_TOKEN = fs.readFileSync(TOKEN_FILE, 'utf8').trim(); } catch {}
+const HIDDEN_DIRS = new Set(['.git', 'node_modules', '.cache', '.cpanel', '.trash']);
+const HIDDEN_TOP  = new Set(['.git', 'node_modules', '.env']);
+
+// ----- init -----
 try { fs.mkdirSync(QUEUE_DIR, { recursive: true }); } catch {}
 
-// --- helpers ---
+// Lazily load token (don’t crash if unreadable)
+let ACTION_TOKEN = null;
+function loadToken() {
+  if (ACTION_TOKEN) return ACTION_TOKEN;
+  try {
+    ACTION_TOKEN = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
+  } catch (e) {
+    ACTION_TOKEN = (process.env.ACTION_TOKEN || '').trim();
+    console.error(`[ai2] WARN: failed to read ACTION_TOKEN from ${TOKEN_FILE}: ${e.message}`);
+  }
+  return ACTION_TOKEN;
+}
+
+// ----- helpers -----
 const nowISO  = () => new Date().toISOString();
 const ipOf    = (req) => String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '');
 const idemSan = (s) => String(s || '').replace(/[^A-Za-z0-9._:-]/g, '_');
@@ -61,6 +78,7 @@ const ts      = () => {
 };
 const r4      = () => crypto.randomBytes(2).toString('hex');
 const sha256S = (s) => crypto.createHash('sha256').update(s, 'utf8').digest('hex');
+
 const logDbg  = (objOrStr) => {
   try {
     const line = typeof objOrStr === 'string' ? objOrStr : JSON.stringify(objOrStr);
@@ -68,12 +86,37 @@ const logDbg  = (objOrStr) => {
   } catch {}
 };
 
+function sendJSON(res, code, obj) {
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=UTF-8' });
+  res.end(JSON.stringify(obj));
+}
+function sendText(res, code, text) {
+  res.writeHead(code, { 'Content-Type': 'text/plain; charset=UTF-8' });
+  res.end(text);
+}
+
+function getTokenFromHeaders(req) {
+  const h   = String(req.headers['authorization'] || '');
+  const tok = h.toLowerCase().startsWith('bearer ') ? h.slice(7) : '';
+  const alt = String(req.headers['x-api-key'] || '');
+  return tok || alt || '';
+}
+function requireAuth(req, res) {
+  const expected = loadToken();
+  const token = getTokenFromHeaders(req);
+  if (!expected || !token || token !== expected) {
+    sendJSON(res, 401, { ok:false, error:'unauthorized' });
+    return false;
+  }
+  return true;
+}
+
 // tolerant Base64 -> utf8 (accepts base64url, whitespace, missing padding)
 function fromAnyB64(s) {
   if (typeof s !== 'string') return '';
-  s = s.replace(/\s+/g, '');                           // strip whitespace
-  s = s.replace(/-/g, '+').replace(/_/g, '/');         // url-safe -> std
-  while (s.length % 4) s += '=';                       // re-pad
+  s = s.replace(/\s+/g, ''); // strip whitespace
+  s = s.replace(/-/g, '+').replace(/_/g, '/'); // url-safe -> std
+  while (s.length % 4) s += '=';
   try { return Buffer.from(s, 'base64').toString('utf8'); }
   catch { return ''; }
 }
@@ -94,33 +137,13 @@ function readBody(req, cb) {
   req.on('error', cb);
 }
 
-function sendJSON(res, code, obj) {
-  res.writeHead(code, { 'Content-Type': 'application/json; charset=UTF-8' });
-  res.end(JSON.stringify(obj));
-}
-function sendText(res, code, text) {
-  res.writeHead(code, { 'Content-Type': 'text/plain; charset=UTF-8' });
-  res.end(text);
-}
-
-// Accept Authorization: Bearer <token> or X-Api-Key: <token>
-function bearerOK(req){
-  const h   = String(req.headers['authorization']||'');
-  const tok = h.toLowerCase().startsWith('bearer ') ? h.slice(7) : '';
-  const alt = String(req.headers['x-api-key']||'');
-  return ACTION_TOKEN && ((tok && tok === ACTION_TOKEN) || (alt && alt === ACTION_TOKEN));
-}
-
-// --- tiny static server: /ai2/static/* -> ./public/* (read-only; json/text only) ---
-function serveStatic(req, res, parsedPathname) {
-  // Only allow GET or HEAD
+// static: /ai2/static/* (or /static/*) -> ./public/*
+function serveStatic(req, res, pathname) {
   if (req.method !== 'GET' && req.method !== 'HEAD') return false;
-  // Accept /ai2/static/* and /static/*
-  if (!parsedPathname.startsWith('/ai2/static/') && !parsedPathname.startsWith('/static/')) return false;
+  if (!pathname.startsWith(`${BASE_URI}/static/`) && !pathname.startsWith('/static/')) return false;
 
-  const rel = parsedPathname.replace(/^\/(ai2\/)?static\//, '');
-  // normalize: disallow path traversal
-  const safeRel = rel.split('/').filter(seg => seg && seg !== '.' && seg !== '..').join('/');
+  const rel0 = pathname.replace(/^\/(ai2\/)?static\//, '');
+  const safeRel = rel0.split('/').filter(seg => seg && seg !== '.' && seg !== '..').join('/');
   const file = path.join(STATIC_ROOT, safeRel);
 
   try {
@@ -142,46 +165,19 @@ function serveStatic(req, res, parsedPathname) {
   return true;
 }
 
-// --- core validation for diffs (write endpoints) ---
+// diff validation helpers
 function validateBase64Chars(b64) { return /^[A-Za-z0-9+/_=-]+$/.test(b64); }
 function containsControlBytes(s) { return /[\x00-\x08\x0B\x0C\x0E-\x1F]/.test(s); }
 
 function validateUnifiedDiff(diff) {
   if (!/^diff --git /m.test(diff)) return { ok:false, error:'diff_invalid_format' };
+  // minimal structural checks for new files
   if (/(^|\n)new file mode \d+/.test(diff)) {
     if (!/(^|\n)new file mode 100644(\r?\n)/.test(diff)) return { ok:false, error:'new_file_mode_must_be_100644' };
     if (!/(^|\n)--- \/dev\/null(\r?\n)/.test(diff))     return { ok:false, error:'new_file_requires_devnull' };
     if (!/(^|\n)\+\+\+ b\/[^\n]+(\r?\n)/.test(diff))    return { ok:false, error:'bad_plus_plus_plus_line' };
-    const hunk = diff.match(/(^|\n)@@ -0,0 \+(\d+) @@/);
-    if (!hunk) return { ok:false, error:'bad_hunk_header_for_new_file' };
-    const expected = parseInt(hunk[2], 10);
-    const plusLines = diff.split('\n').filter(line => line.startsWith('+') && !/^\+\+\+ b\//.test(line)).length;
-    if (Number.isFinite(expected) && expected > 0 && plusLines > 0 && plusLines < expected) {
-      return { ok:false, error:'hunk_content_lines_mismatch' };
-    }
   }
   return { ok:true };
-}
-
-// --- write endpoints ---
-function handleEcho(req, res) {
-  readBody(req, (err, buf) => {
-    if (err) return sendJSON(res, err.code === 413 ? 413 : 400, { ok:false, error: err.message || 'read_error' });
-    const ct = String(req.headers['content-type'] || '').toLowerCase();
-    let body = null, decoded = '';
-    try { if (ct.includes('json')) body = JSON.parse(buf.toString('utf8')); } catch {}
-    if (body && typeof body.diff_b64 === 'string' && validateBase64Chars(body.diff_b64)) {
-      decoded = fromAnyB64(body.diff_b64).slice(0, 200);
-    }
-    return sendJSON(res, 200, {
-      ok: true,
-      ct,
-      raw_len: buf.length,
-      headers: req.headers,
-      body,
-      decoded_preview: decoded
-    });
-  });
 }
 
 function execp(cmd, args, opts={}) {
@@ -193,8 +189,30 @@ function execp(cmd, args, opts={}) {
   });
 }
 
+// ----- endpoints (write) -----
+function handleEcho(req, res) {
+  readBody(req, (err, buf) => {
+    if (err) return sendJSON(res, err.code === 413 ? 413 : 400, { ok:false, error: err.message || 'read_error' });
+    const ct = String(req.headers['content-type'] || '').toLowerCase();
+
+    let body = null, decoded = '';
+    try { if (ct.includes('json')) body = JSON.parse(buf.toString('utf8')); } catch {}
+    if (body && typeof body.diff_b64 === 'string' && validateBase64Chars(body.diff_b64)) {
+      decoded = fromAnyB64(body.diff_b64).slice(0, 200);
+    }
+
+    // redact headers before logging
+    const hdr = { ...req.headers };
+    if (hdr.authorization) hdr.authorization = '[redacted]';
+    if (hdr['x-api-key'])  hdr['x-api-key']  = '[redacted]';
+
+    logDbg({ time: nowISO(), tag:'ECHO', ip: ipOf(req), ct, raw_len: buf.length, headers: hdr });
+    return sendJSON(res, 200, { ok:true, ct, raw_len: buf.length, headers: hdr, body, decoded_preview: decoded });
+  });
+}
+
 function handleDiffSubmit(req, res) {
-  if (!bearerOK(req)) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
+  if (!requireAuth(req, res)) return;
 
   const ct = (req.headers['content-type'] || '').toLowerCase();
   if (!ct.includes('application/json')) return sendJSON(res, 415, { ok:false, error:'unsupported_media_type' });
@@ -202,8 +220,12 @@ function handleDiffSubmit(req, res) {
   readBody(req, (err, buf) => {
     if (err) return sendJSON(res, err.code === 413 ? 413 : 400, { ok:false, error: err.message || 'read_error' });
 
-    logDbg({ time: nowISO(), tag: 'REQ', path: req.url, method: req.method, ct, ip: ipOf(req), headers: req.headers });
-    logDbg({ time: nowISO(), tag: 'REQ_BODY', raw_len: buf.length, json_head: buf.slice(0, 512).toString('utf8') });
+    // redact headers before logging
+    const hdr = { ...req.headers };
+    if (hdr.authorization) hdr.authorization = '[redacted]';
+    if (hdr['x-api-key'])  hdr['x-api-key']  = '[redacted]';
+    logDbg({ time: nowISO(), tag:'REQ', path: req.url, method: req.method, ct, ip: ipOf(req), headers: hdr });
+    logDbg({ time: nowISO(), tag:'REQ_BODY', raw_len: buf.length, json_head: buf.slice(0, 512).toString('utf8') });
 
     let body = {};
     try { body = JSON.parse(buf.toString('utf8') || '{}'); }
@@ -221,7 +243,7 @@ function handleDiffSubmit(req, res) {
     if (!validateBase64Chars(diff_b64_raw)) return sendJSON(res, 400, { ok:false, error:'diff_b64_invalid_chars' });
 
     const diff = fromAnyB64(diff_b64_raw);
-    logDbg({ time: nowISO(), tag: 'DECODED_HEAD', preview: diff.slice(0, 200) });
+    logDbg({ time: nowISO(), tag:'DECODED_HEAD', preview: diff.slice(0, 200) });
 
     if (!diff)                      return sendJSON(res, 400, { ok:false, error:'diff_b64_decode_failed' });
     if (containsControlBytes(diff)) return sendJSON(res, 400, { ok:false, error:'diff_contains_control_bytes' });
@@ -255,11 +277,11 @@ function handleDiffSubmit(req, res) {
       fs.writeFileSync(file, JSON.stringify(job));
       if (idemVal && idemPointerFile) fs.writeFileSync(idemPointerFile, file);
     } catch (e) {
-      logDbg({ time: nowISO(), tag: 'QUEUE_WRITE_FAIL', error: String(e) });
+      logDbg({ time: nowISO(), tag:'QUEUE_WRITE_FAIL', error: String(e) });
       return sendJSON(res, 500, { ok:false, error:'queue_write_failed' });
     }
 
-    logDbg({ time: nowISO(), tag: 'ENQUEUED', job: path.basename(file), sha256: job.sha256, msg: job.message, idem: idemVal || null });
+    logDbg({ time: nowISO(), tag:'ENQUEUED', job: path.basename(file), sha256: job.sha256, msg: job.message, idem: idemVal || null });
     return sendJSON(res, 200, { ok:true, queued: path.basename(file), sha256: job.sha256 });
   });
 }
@@ -270,6 +292,7 @@ async function handleDiffDryrun(req, res) {
 
   readBody(req, async (err, buf) => {
     if (err) return sendJSON(res, err.code === 413 ? 413 : 400, { ok:false, error: err.message || 'read_error' });
+
     let body = {};
     try { body = JSON.parse(buf.toString('utf8') || '{}'); }
     catch { return sendJSON(res, 400, { ok:false, error:'invalid_json' }); }
@@ -311,7 +334,7 @@ async function handleDiffDryrun(req, res) {
   });
 }
 
-// --- repo browsing helpers (read-only) ---
+// ----- repo browsing (read-only) -----
 function safeJoin(root, userPath){
   const p = path.normalize('/' + String(userPath || '').replace(/^\/+/, ''));
   const full = path.join(root, '.' + p);
@@ -321,7 +344,7 @@ function safeJoin(root, userPath){
 function isHiddenName(n){ return n.startsWith('.') && !['.htaccess','.htpasswd'].includes(n); }
 
 function handleRepoList(req, res) {
-  if (!bearerOK(req)) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
+  if (!requireAuth(req, res)) return;
 
   const parsed = url.parse(req.url, true);
   const rel = String(parsed.query.path || '');
@@ -360,7 +383,7 @@ function handleRepoList(req, res) {
 }
 
 function handleRepoGet(req, res) {
-  if (!bearerOK(req)) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
+  if (!requireAuth(req, res)) return;
 
   const parsed = url.parse(req.url, true);
   const rel = String(parsed.query.path || '');
@@ -385,54 +408,75 @@ function handleRepoGet(req, res) {
   });
 }
 
-// --- router ---
+// ----- router -----
 function handler(req, res) {
-  const p = (url.parse(req.url).pathname || '');
+  const pathname = url.parse(req.url).pathname || '';
 
-  // static files first (cheap, no body read)
-  if (serveStatic(req, res, p)) return;
+  // serve static first
+  if (serveStatic(req, res, pathname)) return;
 
   // health
-  if (req.method === 'GET' && (p === '/ai2/_health' || p === '/_health'))
+  if (req.method === 'GET' && (pathname === `${BASE_URI}/_health` || pathname === '/_health'))
     return sendJSON(res, 200, { ok:true, time: nowISO() });
-  if (req.method === 'GET' && (p === '/ai2/health' || p === '/health'))
+  if (req.method === 'GET' && (pathname === `${BASE_URI}/health` || pathname === '/health'))
     return sendJSON(res, 200, { ok:true, time: nowISO() });
 
+  // debug (which node, passenger env)
+  if (req.method === 'GET' && (pathname === `${BASE_URI}/debug` || pathname === '/debug'))
+    return sendJSON(res, 200, {
+      ok: true,
+      underPassenger: !!process.env.PASSENGER_APP_ENV,
+      node: process.version,
+      port: process.env.PORT || process.env.PASSENGER_PORT || null,
+      cwd: process.cwd(),
+      time: nowISO()
+    });
+
   // version
-  if (req.method === 'GET' && (p === '/ai2/version' || p === '/version')) {
+  if (req.method === 'GET' && (pathname === `${BASE_URI}/version` || pathname === '/version')) {
     let rev = 'unknown';
     try { rev = fs.readFileSync(VERSION_FILE, 'utf8').trim(); } catch {}
     return sendJSON(res, 200, { ok:true, version: rev });
   }
 
   // echo (debug)
-  if (req.method === 'POST' && (p === '/ai2/echo' || p === '/echo'))
+  if (req.method === 'POST' && (pathname === `${BASE_URI}/echo` || pathname === '/echo'))
     return handleEcho(req, res);
 
   // submit diff (auth required)
-  if (req.method === 'POST' && (p === '/ai2/diff_submit' || p === '/diff_submit'))
+  if (req.method === 'POST' && (pathname === `${BASE_URI}/diff_submit` || pathname === '/diff_submit'))
     return handleDiffSubmit(req, res);
 
   // dryrun (no auth; safe validation only)
-  if (req.method === 'POST' && (p === '/ai2/diff_dryrun' || p === '/diff_dryrun'))
+  if (req.method === 'POST' && (pathname === `${BASE_URI}/diff_dryrun` || pathname === '/diff_dryrun'))
     return handleDiffDryrun(req, res);
 
   // repo browsing (auth required)
-if (req.method === 'GET' && (p === '/ai2/repo/list' || p === '/repo/list' || p === '/ai2/fs/list' || p === '/fs/list' || p === '/ai2/list'))
+  if (req.method === 'GET' && (
+      pathname === `${BASE_URI}/repo/list` || pathname === '/repo/list' ||
+      pathname === `${BASE_URI}/fs/list`   || pathname === '/fs/list'   ||
+      pathname === `${BASE_URI}/list`
+    )) return handleRepoList(req, res);
 
-    return handleRepoList(req, res);
-  if (req.method === 'GET' && (p === '/ai2/repo/get'  || p === '/repo/get'  || p === '/ai2/fs/get'  || p === '/fs/get'))
-    return handleRepoGet(req, res);
+  if (req.method === 'GET' && (
+      pathname === `${BASE_URI}/repo/get`  || pathname === '/repo/get'  ||
+      pathname === `${BASE_URI}/fs/get`    || pathname === '/fs/get'    ||
+      pathname === `${BASE_URI}/get`
+    )) return handleRepoGet(req, res);
 
   // root banner
-  if (req.method === 'GET' && (p === '/ai2/' || p === '/'))
+  if (req.method === 'GET' && (pathname === `${BASE_URI}/` || pathname === '/'))
     return sendText(res, 200, 'OK (ai2)\n');
 
   // fallback
   return sendText(res, 404, 'Not Found\n');
 }
 
-// --- start server (Passenger sets PORT) ---
+// ----- start server (Passenger sets PORT) -----
+process.on('uncaughtException', e => console.error('[ai2] uncaughtException:', e));
+process.on('unhandledRejection', e => console.error('[ai2] unhandledRejection:', e));
+console.log(`[ai2] starting with Node ${process.version}, PORT=${process.env.PORT || '(none)'} at ${nowISO()}`);
+
 const PORT = process.env.PORT || 3000;
 http.createServer(handler).listen(PORT, () => {
   logDbg({ tag: 'boot', time: nowISO(), msg: `listening PORT=${PORT}` });
