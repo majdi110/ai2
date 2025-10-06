@@ -151,10 +151,27 @@ function serveStatic(req, res, pathname) {
     if (!real.startsWith(STATIC_ROOT)) { sendText(res, 403, 'Forbidden\n'); return true; }
     if (!fs.existsSync(real) || !fs.statSync(real).isFile()) { sendText(res, 404, 'Not Found\n'); return true; }
 
-    let ct = 'text/plain; charset=UTF-8';
-    if (/\.json$/i.test(real)) ct = 'application/json; charset=UTF-8';
-    else if (/\.txt$/i.test(real) || /\.log$/i.test(real)) ct = 'text/plain; charset=UTF-8';
-    else return sendText(res, 415, 'Unsupported Media Type\n');
+    const ext = path.extname(real).toLowerCase();
+    let ct;
+    switch (ext) {
+      case '.html':
+      case '.htm':  ct = 'text/html; charset=UTF-8'; break;
+      case '.css':  ct = 'text/css; charset=UTF-8'; break;
+      case '.js':   ct = 'application/javascript; charset=UTF-8'; break;
+      case '.json': ct = 'application/json; charset=UTF-8'; break;
+      case '.txt':
+      case '.log':  ct = 'text/plain; charset=UTF-8'; break;
+      case '.ico':  ct = 'image/x-icon'; break;
+      case '.svg':  ct = 'image/svg+xml'; break;
+      case '.png':  ct = 'image/png'; break;
+      case '.jpg':
+      case '.jpeg': ct = 'image/jpeg'; break;
+      case '.gif':  ct = 'image/gif'; break;
+      case '.webp': ct = 'image/webp'; break;
+      case '.woff': ct = 'font/woff'; break;
+      case '.woff2':ct = 'font/woff2'; break;
+      default: return sendText(res, 415, 'Unsupported Media Type\n');
+    }
 
     const data = fs.readFileSync(real);
     res.writeHead(200, { 'Content-Type': ct, 'Cache-Control': 'no-cache' });
