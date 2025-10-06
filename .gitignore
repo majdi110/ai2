@@ -35,3 +35,9 @@ tmp/
 *.patch
 .DS_Store
 node_modules/
+tmp/
+*.log
+*.diff
+*.patch
+.DS_Store
+node_modules/
