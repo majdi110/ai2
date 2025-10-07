@@ -2,14 +2,12 @@
   "name": "ai2-app",
   "version": "1.0.1",
   "private": true,
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "engines": {
+  "main": "server.mjs", 
+  "scripts": { "start": "node server.mjs" }, 
+  "engines":{
     "node": ">=16"
   },
-  "type": "module",
+  
   "dependencies": {
     "node-fetch": "^2.7.0"
   }
