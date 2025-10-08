@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Windows Saver</title>
+  <style>
+    body {
+      background-color: #000;
+      overflow: hidden;
+      margin: 0;
+      height: 100vh;
+      width: 100vw;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      cursor: none;
+    }
+    .logo {
+      position: absolute;
+      font-family: "Segoe UI", sans-serif;
+      font-size: 2em;
+      font-weight: bold;
+      color: #00a2ed;
+      text-shadow: 0 0 10px #00a2ed, 0 0 20px #00a2ed;
+      user-select: none;
+      animation: bounce 8s linear infinite;
+    }
+    @keyframes bounce {
+      0% { transform: translate(0, 0); }
+      25% { transform: translate(calc(100vw - 200px), 0); }
+      50% { transform: translate(calc(100vw - 200px), calc(100vh - 100px)); }
+      75% { transform: translate(0, calc(100vh - 100px)); }
+      100% { transform: translate(0, 0); }
+    }
+    .stars {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: radial-gradient(circle, rgba(255,255,255,0.2) 1px, transparent 1px);
+      background-size: 3px 3px;
+      animation: twinkle 4s infinite alternate;
+    }
+    @keyframes twinkle {
+      0% { opacity: 0.4; }
+      100% { opacity: 0.8; }
+    }
+  </style>
+  <script>
+    document.addEventListener('mousemove', () => {
+      document.querySelector('.logo').style.animationPlayState = 'paused';
+      setTimeout(() => {
+        document.querySelector('.logo').style.animationPlayState = 'running';
+      }, 3000);
+    });
+  </script>
+</head>
+<body>
+  <div class="stars"></div>
+  <div class="logo">Windows Saver</div>
+</body>
+</html>
