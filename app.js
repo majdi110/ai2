@@ -13,7 +13,7 @@
  *   POST /ai2/echo               -> debug echo; shows headers/body + decoded preview
  *
  * Actions (write):
- *   POST /ai2/diff_submit        -> enqueue a Base64/base64url unified diff
+ *   POST /ai2/diff_submit        -> enqueue a unified diff (plain text)
  *   POST /ai2/diff_dryrun        -> git-apply --check (no enqueue), against origin/<base_branch>
  *
  * Repo browsing (read-only; require token):
@@ -44,7 +44,7 @@ const STATIC_ROOT  = path.join(__dirname, 'public');
 const VERSION_FILE = path.join(__dirname, 'VERSION.txt');
 const MAX_BYTES    = 512 * 1024;
 
-// Active repo path (this app’s own repo)
+// Active repo path (this app's own repo)
 const REPO_ROOT      = '/home/genweb/public_html/datav.belocloud.com/ai2';
 const LIST_MAX_DEPTH = 3;
 const GET_MAX_BYTES  = 256 * 1024;
@@ -55,7 +55,7 @@ const HIDDEN_TOP  = new Set(['.git', 'node_modules', '.env']);
 // ----- init -----
 try { fs.mkdirSync(QUEUE_DIR, { recursive: true }); } catch {}
 
-// Lazily load token (don’t crash if unreadable)
+// Lazily load token (don't crash if unreadable)
 let ACTION_TOKEN = null;
 function loadToken() {
   if (ACTION_TOKEN) return ACTION_TOKEN;
@@ -109,16 +109,6 @@ function requireAuth(req, res) {
     return false;
   }
   return true;
-}
-
-// tolerant Base64 -> utf8 (accepts base64url, whitespace, missing padding)
-function fromAnyB64(s) {
-  if (typeof s !== 'string') return '';
-  s = s.replace(/\s+/g, ''); // strip whitespace
-  s = s.replace(/-/g, '+').replace(/_/g, '/'); // url-safe -> std
-  while (s.length % 4) s += '=';
-  try { return Buffer.from(s, 'base64').toString('utf8'); }
-  catch { return ''; }
 }
 
 // read entire request body (size-guarded)
@@ -183,17 +173,24 @@ function serveStatic(req, res, pathname) {
 }
 
 // diff validation helpers
-function validateBase64Chars(b64) { return /^[A-Za-z0-9+/_=-]+$/.test(b64); }
 function containsControlBytes(s) { return /[\x00-\x08\x0B\x0C\x0E-\x1F]/.test(s); }
 
 function validateUnifiedDiff(diff) {
-  if (!/^diff --git /m.test(diff)) return { ok:false, error:'diff_invalid_format' };
-  // minimal structural checks for new files
-  if (/(^|\n)new file mode \d+/.test(diff)) {
+  // Accept either full unified diff format OR just hunks (for testing/simple cases)
+  const hasFullFormat = /^diff --git /m.test(diff);
+  const hasHunkFormat = /@@ -\d+,?\d* \+\d+,?\d* @@/m.test(diff);
+  
+  if (!hasFullFormat && !hasHunkFormat) {
+    return { ok:false, error:'diff_invalid_format' };
+  }
+  
+  // If it's a full format diff, do structural checks for new files
+  if (hasFullFormat && /(^|\n)new file mode \d+/.test(diff)) {
     if (!/(^|\n)new file mode 100644(\r?\n)/.test(diff)) return { ok:false, error:'new_file_mode_must_be_100644' };
     if (!/(^|\n)--- \/dev\/null(\r?\n)/.test(diff))     return { ok:false, error:'new_file_requires_devnull' };
     if (!/(^|\n)\+\+\+ b\/[^\n]+(\r?\n)/.test(diff))    return { ok:false, error:'bad_plus_plus_plus_line' };
   }
+  
   return { ok:true };
 }
 
@@ -212,11 +209,15 @@ function handleEcho(req, res) {
     if (err) return sendJSON(res, err.code === 413 ? 413 : 400, { ok:false, error: err.message || 'read_error' });
     const ct = String(req.headers['content-type'] || '').toLowerCase();
 
-    let body = null, decoded = '';
-    try { if (ct.includes('json')) body = JSON.parse(buf.toString('utf8')); } catch {}
-    if (body && typeof body.diff_b64 === 'string' && validateBase64Chars(body.diff_b64)) {
-      decoded = fromAnyB64(body.diff_b64).slice(0, 200);
-    }
+    let body = null, preview = '';
+    try { 
+      if (ct.includes('json')) {
+        body = JSON.parse(buf.toString('utf8'));
+        if (body && typeof body.diff === 'string') {
+          preview = body.diff.slice(0, 200);
+        }
+      }
+    } catch {}
 
     // redact headers before logging
     const hdr = { ...req.headers };
@@ -224,17 +225,17 @@ function handleEcho(req, res) {
     if (hdr['x-api-key'])  hdr['x-api-key']  = '[redacted]';
 
     logDbg({ time: nowISO(), tag:'ECHO', ip: ipOf(req), ct, raw_len: buf.length, headers: hdr });
-    return sendJSON(res, 200, { ok:true, ct, raw_len: buf.length, headers: hdr, body, decoded_preview: decoded });
+    return sendJSON(res, 200, { ok:true, ct, raw_len: buf.length, headers: hdr, body, diff_preview: preview });
   });
 }
 
-function handleDiffSubmit(req, res) {
+async function handleDiffSubmit(req, res) {
   if (!requireAuth(req, res)) return;
 
   const ct = (req.headers['content-type'] || '').toLowerCase();
   if (!ct.includes('application/json')) return sendJSON(res, 415, { ok:false, error:'unsupported_media_type' });
 
-  readBody(req, (err, buf) => {
+  readBody(req, async (err, buf) => {
     if (err) return sendJSON(res, err.code === 413 ? 413 : 400, { ok:false, error: err.message || 'read_error' });
 
     // redact headers before logging
@@ -250,19 +251,19 @@ function handleDiffSubmit(req, res) {
 
     const base         = String(body.base_branch || 'main');
     const rawMessage   = (typeof body.message === 'string' ? body.message.trim() : '');
-    const diff_b64_raw = String(body.diff_b64 || '');
+    const diff         = String(body.diff || '');
     const idemHeader   = String(req.headers['x-idempotency-key'] || '');
     const idemBody     = String(body.idempotency_key || '');
     const idemVal      = idemHeader || idemBody || '';
 
-    if (base !== 'main') return sendJSON(res, 403, { ok:false, error:'branch_not_allowed' });
-    if (!diff_b64_raw)   return sendJSON(res, 400, { ok:false, error:'diff_b64_required' });
-    if (!validateBase64Chars(diff_b64_raw)) return sendJSON(res, 400, { ok:false, error:'diff_b64_invalid_chars' });
+    const ALLOWED_BRANCHES = new Set(['main', 'master', 'public']);
+	if (!ALLOWED_BRANCHES.has(base)) {
+		return sendJSON(res, 403, { ok:false, error:'branch_not_allowed' });
+	}
+    if (!diff)           return sendJSON(res, 400, { ok:false, error:'diff_required' });
 
-    const diff = fromAnyB64(diff_b64_raw);
-    logDbg({ time: nowISO(), tag:'DECODED_HEAD', preview: diff.slice(0, 200) });
+    logDbg({ time: nowISO(), tag:'DIFF_HEAD', preview: diff.slice(0, 200) });
 
-    if (!diff)                      return sendJSON(res, 400, { ok:false, error:'diff_b64_decode_failed' });
     if (containsControlBytes(diff)) return sendJSON(res, 400, { ok:false, error:'diff_contains_control_bytes' });
     const v = validateUnifiedDiff(diff);
     if (!v.ok)                      return sendJSON(res, 400, { ok:false, error: v.error });
@@ -299,8 +300,52 @@ function handleDiffSubmit(req, res) {
     }
 
     logDbg({ time: nowISO(), tag:'ENQUEUED', job: path.basename(file), sha256: job.sha256, msg: job.message, idem: idemVal || null });
+
+    // Apply diff to local repository immediately
+    try {
+      await applyDiffToRepo(diff, rawMessage || `ChatGPT change ${nowISO()}`);
+      logDbg({ time: nowISO(), tag:'APPLIED_LOCALLY', job: path.basename(file) });
+    } catch (applyErr) {
+      logDbg({ time: nowISO(), tag:'LOCAL_APPLY_FAILED', error: String(applyErr), job: path.basename(file) });
+      // Don't fail the request if local apply fails - the queue is still there
+    }
+
     return sendJSON(res, 200, { ok:true, queued: path.basename(file), sha256: job.sha256 });
   });
+}
+
+// Apply diff to the local repository
+async function applyDiffToRepo(diff, message) {
+  const repo = REPO_ROOT;
+  const patchPath = path.join(os.tmpdir(), `patch-${Date.now()}-${r4()}.patch`);
+  
+  try {
+    // Write diff to temporary file
+    await fsp.writeFile(patchPath, diff, 'utf8');
+    
+    // Ensure we're on the correct branch
+    await execp('git', ['checkout', 'main'], { cwd: repo });
+    
+    // Pull latest changes
+    await execp('git', ['pull', 'origin', 'main'], { cwd: repo });
+    
+    // Apply the patch
+    await execp('git', ['apply', '--3way', patchPath], { cwd: repo });
+    
+    // Stage all changes
+    await execp('git', ['add', '-A'], { cwd: repo });
+    
+    // Commit
+    await execp('git', ['commit', '-m', message], { cwd: repo });
+    
+    // Push to remote
+    await execp('git', ['push', 'origin', 'main'], { cwd: repo });
+    
+    logDbg({ time: nowISO(), tag:'GIT_PUSH_SUCCESS', message });
+  } finally {
+    // Clean up temp patch file
+    try { await fsp.unlink(patchPath); } catch {}
+  }
 }
 
 async function handleDiffDryrun(req, res) {
@@ -315,15 +360,13 @@ async function handleDiffDryrun(req, res) {
     catch { return sendJSON(res, 400, { ok:false, error:'invalid_json' }); }
 
     const base_branch = body.base_branch ? String(body.base_branch) : 'main';
-    const diff_b64 = body.diff_b64 ? String(body.diff_b64) : '';
-    if (!diff_b64) return sendJSON(res, 400, { ok:false, error:'missing diff_b64' });
+    const diff = body.diff ? String(body.diff) : '';
+    if (!diff) return sendJSON(res, 400, { ok:false, error:'missing diff' });
 
-    const patchText = fromAnyB64(diff_b64);
-    if (!patchText) return sendJSON(res, 400, { ok:false, error:'diff_b64: decode error or empty' });
-    const patchBuf = Buffer.from(patchText, 'utf8');
+    const patchBuf = Buffer.from(diff, 'utf8');
     if (patchBuf.length > 5 * 1024 * 1024) return sendJSON(res, 413, { ok:false, error:'patch too large (>5MB)' });
 
-    const v = validateUnifiedDiff(patchText);
+    const v = validateUnifiedDiff(diff);
     if (!v.ok) return sendJSON(res, 400, { ok:false, error: v.error });
 
     const repo = __dirname;
