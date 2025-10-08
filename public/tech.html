@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Future of Tech ⚙️</title>
+  <style>
+    body {
+      margin: 0;
+      height: 100vh;
+      background: radial-gradient(circle at center, #0f172a 0%, #020617 100%);
+      color: #e2e8f0;
+      font-family: 'Poppins', sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      overflow: hidden;
+    }
+    h1 {
+      font-size: 3em;
+      color: #38bdf8;
+      text-shadow: 0 0 20px rgba(56, 189, 248, 0.8);
+      letter-spacing: 2px;
+    }
+    p {
+      font-size: 1.2em;
+      max-width: 600px;
+      color: #94a3b8;
+      margin-bottom: 40px;
+    }
+    .grid {
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(90deg, rgba(56,189,248,0.1) 1px, transparent 1px),
+                  linear-gradient(180deg, rgba(56,189,248,0.1) 1px, transparent 1px);
+      background-size: 40px 40px;
+      animation: gridMove 10s linear infinite;
+      z-index: -1;
+    }
+    @keyframes gridMove {
+      from { background-position: 0 0, 0 0; }
+      to { background-position: 40px 40px, 40px 40px; }
+    }
+    .circle {
+      position: absolute;
+      width: 300px;
+      height: 300px;
+      border: 2px solid rgba(56,189,248,0.3);
+      border-radius: 50%;
+      animation: rotate 8s linear infinite;
+      box-shadow: 0 0 25px rgba(56,189,248,0.3);
+    }
+    .circle:nth-child(2) {
+      width: 200px;
+      height: 200px;
+      animation-duration: 6s;
+      border-color: rgba(56,189,248,0.6);
+    }
+    .circle:nth-child(3) {
+      width: 100px;
+      height: 100px;
+      animation-duration: 4s;
+      border-color: rgba(56,189,248,0.9);
+    }
+    @keyframes rotate {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    button {
+      background: #38bdf8;
+      border: none;
+      color: #0f172a;
+      padding: 12px 28px;
+      border-radius: 10px;
+      font-size: 1.1em;
+      cursor: pointer;
+      transition: 0.3s ease;
+    }
+    button:hover {
+      background: #0ea5e9;
+      color: #fff;
+      box-shadow: 0 0 15px rgba(56,189,248,0.7);
+    }
+  </style>
+  <script>
+    function exploreFuture() {
+      alert('🚀 The future is now — driven by innovation, powered by imagination.');
+    }
+  </script>
+</head>
+<body>
+  <div class="grid"></div>
+  <div class="circle"></div>
+  <div class="circle"></div>
+  <div class="circle"></div>
+  <h1>Future of Tech ⚙️</h1>
+  <p>Technology is the heartbeat of progress — connecting minds, reshaping worlds, and turning ideas into reality.</p>
+  <button onclick="exploreFuture()">Explore the Future</button>
+</body>
+</html>
