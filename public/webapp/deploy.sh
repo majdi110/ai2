@@ -18,6 +18,10 @@ if [ ! -d "node_modules" ]; then
   npm install --silent
 fi
 
+# Step 2.5: Increase Node.js memory allocation
+echo "🧠 Increasing Node.js memory limit for build (4GB)..."
+export NODE_OPTIONS="--max-old-space-size=4096"
+
 # Step 3: Build the production bundle
 echo "🏗️  Building app..."
 npm run build --silent
