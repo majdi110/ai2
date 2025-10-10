@@ -1,0 +1,46 @@
+name: 🚀 Deploy Belo Dashboard to cPanel via SFTP
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🧰 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 📦 Install dependencies
+        run: npm ci
+        working-directory: public/webapp
+
+      - name: 🏗️ Build Vite project
+        run: npm run build
+        working-directory: public/webapp
+
+      - name: 📂 Deploy via SFTP
+        uses: wlixcc/SFTP-Deploy-Action@v1.2.4
+        with:
+          server: ${{ secrets.SFTP_HOST }}
+          port: ${{ secrets.SFTP_PORT }}
+          username: ${{ secrets.SFTP_USER }}
+          password: ${{ secrets.SFTP_PASS }}
+          local_path: public/webapp/dist/*
+          remote_path: ${{ secrets.SFTP_PATH }}
+          sftp_only: true
+          delete_remote_files: true
+
+      - name: ✅ Confirm deployment success
+        run: |
+          echo "✅ Deployment completed successfully."
+          echo "🌐 Live site: https://datav.belocloud.com/ai2/public/webapp/"
+
+      - name: 🕒 Log timestamp
+        run: echo "Deployment finished at $(date '+%Y-%m-%d %H:%M:%S')"
