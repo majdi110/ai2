@@ -24,7 +24,13 @@ export NODE_OPTIONS="--max-old-space-size=4096"
 
 # Step 3: Build the production bundle
 echo "🏗️  Building app..."
-npm run build --silent
+# Use local Node binary and load crypto fix before running Vite build
+NODE_BIN=$(which node)
+if [ -z "$NODE_BIN" ]; then
+  NODE_BIN="/opt/alt/alt-nodejs18/bin/node"
+fi
+
+$NODE_BIN -r ./fix-crypto.js ./node_modules/vite/bin/vite.js build --silent
 
 # Step 4: Move built files to serve directory
 echo "📂 Deploying files to production..."
