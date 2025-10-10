@@ -1,2 +1,0 @@
-BeloCloud AI2 write test
-Created via diff_submit demo
