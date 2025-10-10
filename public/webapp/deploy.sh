@@ -31,9 +31,19 @@ echo "📂 Deploying files to production..."
 rm -rf ./index.html ./assets ./vite.svg 2>/dev/null || true
 cp -r dist/* .
 
+# Verify deployment assets
+if [ ! -d "assets" ]; then
+  echo "❌ Error: Assets folder missing after build!"
+  exit 1
+fi
+
+# Confirm deployment
+echo "✅ React build and assets successfully deployed."
+
 # Step 5: Clean up build folder
 rm -rf dist
 
 echo "✅ Deployment complete!"
 echo "🌐 You can now visit your live app at https://datav.belocloud.com/ai2/public/webapp/"
+
 

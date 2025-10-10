@@ -32,7 +32,9 @@ function compressAssets() {
 export default defineConfig({
   plugins: [react(), compressAssets()],
   root: '.',
-  base: './', // ensures proper relative paths when served under /public/webapp/
+  // Set correct base path for deployment under datav.belocloud.com
+  // Adjusted to match hosted URL: https://datav.belocloud.com/ai2/public/webapp/
+  base: '/ai2/public/webapp/',
   build: {
     outDir: 'dist',
     assetsDir: 'assets',
@@ -56,6 +58,8 @@ export default defineConfig({
     port: 4173,
     open: true,
   },
+  publicDir: 'public',
 });
+
 
 

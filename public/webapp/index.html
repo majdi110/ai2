@@ -6,7 +6,16 @@
     <title>Belo Dashboard</title>
   </head>
   <body class="bg-gray-50 text-gray-900">
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <div id="root">
+      <noscript>
+        <p style="text-align:center;margin-top:2em;font-family:sans-serif;color:#555;">
+          ⚠️ JavaScript is disabled — Belo Dashboard requires JS to run.
+        </p>
+      </noscript>
+      <p id="loader" style="text-align:center;margin-top:2em;font-family:sans-serif;color:#777;">
+        Loading Belo Dashboard...
+      </p>
+    </div>
+    <script type="module" src="/ai2/public/webapp/src/main.tsx" onload="document.getElementById('loader').remove()"></script>
   </body>
 </html>
