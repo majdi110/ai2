@@ -3,3 +3,10 @@ RewriteCond %{REQUEST_FILENAME} !-d
 RewriteCond %{DOCUMENT_ROOT}/ai2/public/%{REQUEST_FILENAME} -f [OR]
 RewriteCond %{DOCUMENT_ROOT}/ai2/public/%{REQUEST_FILENAME} -d
 RewriteRule ^(.*)$ public/$1 [L]
+
+# Enable PHP handling for .php files
+AddHandler application/x-httpd-php .php
+AddType application/x-httpd-php .php
+
+# Optional: set index.php as default directory index
+DirectoryIndex index.php
