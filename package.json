@@ -2,13 +2,26 @@
   "name": "ai2-app",
   "version": "1.0.1",
   "private": true,
-  "main": "server.mjs", 
-  "scripts": { "start": "node server.mjs" }, 
-  "engines":{
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": {
     "node": ">=16"
   },
-  
   "dependencies": {
     "node-fetch": "^2.7.0"
-  }
+  },
+  "description": "",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/majdi110/ai2.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/majdi110/ai2/issues"
+  },
+  "homepage": "https://github.com/majdi110/ai2#readme"
 }
