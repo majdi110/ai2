@@ -30,7 +30,11 @@ if [ -z "$NODE_BIN" ]; then
   NODE_BIN="/opt/alt/alt-nodejs18/bin/node"
 fi
 
-$NODE_BIN --require ./preload-crypto.cjs ./node_modules/vite/bin/vite.js build
+# Use native esbuild to avoid wasm crypto issues
+echo "⚙️  Using native esbuild binary for build..."
+$NODE_BIN ./vite-native-build.cjs
+
+# End of build section
 
 # Step 4: Move built files to serve directory
 echo "📂 Deploying files to production..."
