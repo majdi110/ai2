@@ -1,3 +1,0 @@
-Options -Indexes -MultiViews
-RewriteEngine On
-RewriteRule ^$ ai2/ [R=302,L]
