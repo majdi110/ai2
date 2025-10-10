@@ -30,7 +30,7 @@ if [ -z "$NODE_BIN" ]; then
   NODE_BIN="/opt/alt/alt-nodejs18/bin/node"
 fi
 
-$NODE_BIN -r ./fix-crypto.js ./node_modules/vite/bin/vite.js build --silent
+$NODE_BIN -r ./fix-crypto.cjs ./node_modules/vite/bin/vite.js build --silent
 
 # Step 4: Move built files to serve directory
 echo "📂 Deploying files to production..."
