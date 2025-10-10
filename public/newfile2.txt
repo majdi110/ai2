@@ -1,1 +1,0 @@
-This file was added via connector test.
