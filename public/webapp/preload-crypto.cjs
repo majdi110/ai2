@@ -6,7 +6,7 @@ try {
     const nodeCrypto = require('crypto');
     if (nodeCrypto.webcrypto) {
       globalThis.crypto = nodeCrypto.webcrypto;
-      console.log('⚙️  Preloaded crypto polyfill successfully.');
+      console.log('⚙️  Preloaded crypto polyfill successfully (CJS version).');
     } else {
       console.warn('⚠️  WebCrypto not available in this Node environment.');
     }
