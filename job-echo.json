@@ -1,0 +1,9 @@
+{
+  "type": "commands",
+  "schema": 1,
+  "workdir": "/home/genweb/public_html/datav.belocloud.com/ai2",
+  "steps": [
+    { "label": "hello", "run": "echo 'hello from commands runner'", "timeout": "30s",
+      "expect": [{ "regex": "hello from commands runner", "required": true }] }
+  ]
+}

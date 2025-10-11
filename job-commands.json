@@ -1,0 +1,12 @@
+{
+  "type": "commands",
+  "schema": 1,
+  "workdir": "/home/genweb/public_html/datav.belocloud.com/ai2",
+  "env": { "NODE_OPTIONS": "--max-old-space-size=4096" },
+  "steps": [
+    { "label": "install", "run": "npm ci", "timeout": "10m", "on_error": "stop" },
+    { "label": "build",   "run": "npm run build", "timeout": "20m", "on_error": "goto:more_mem" },
+    { "label": "deploy",  "run": "rsync -av dist/ /home/genweb/public_html/datav.belocloud.com/ai2/", "on_error": "stop" },
+    { "label": "more_mem","set_env": {"NODE_OPTIONS": "--max-old-space-size=8192"}, "run": "npm run build", "timeout": "25m", "on_error": "stop" }
+  ]
+}

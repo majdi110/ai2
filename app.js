@@ -15,6 +15,7 @@
  * Actions (write):
  *   POST /ai2/diff_submit        -> enqueue a unified diff (plain text)
  *   POST /ai2/diff_dryrun        -> git-apply --check (no enqueue), against origin/<base_branch>
+ *   POST /ai2/job_submit         -> enqueue a commands job (picked up by worker.sh)
  *
  * Repo browsing (read-only; require token):
  *   GET  /ai2/repo/list?path=&depth=
@@ -176,21 +177,17 @@ function serveStatic(req, res, pathname) {
 function containsControlBytes(s) { return /[\x00-\x08\x0B\x0C\x0E-\x1F]/.test(s); }
 
 function validateUnifiedDiff(diff) {
-  // Accept either full unified diff format OR just hunks (for testing/simple cases)
   const hasFullFormat = /^diff --git /m.test(diff);
   const hasHunkFormat = /@@ -\d+,?\d* \+\d+,?\d* @@/m.test(diff);
-  
+
   if (!hasFullFormat && !hasHunkFormat) {
     return { ok:false, error:'diff_invalid_format' };
   }
-  
-  // If it's a full format diff, do structural checks for new files
   if (hasFullFormat && /(^|\n)new file mode \d+/.test(diff)) {
     if (!/(^|\n)new file mode 100644(\r?\n)/.test(diff)) return { ok:false, error:'new_file_mode_must_be_100644' };
     if (!/(^|\n)--- \/dev\/null(\r?\n)/.test(diff))     return { ok:false, error:'new_file_requires_devnull' };
     if (!/(^|\n)\+\+\+ b\/[^\n]+(\r?\n)/.test(diff))    return { ok:false, error:'bad_plus_plus_plus_line' };
   }
-  
   return { ok:true };
 }
 
@@ -210,7 +207,7 @@ function handleEcho(req, res) {
     const ct = String(req.headers['content-type'] || '').toLowerCase();
 
     let body = null, preview = '';
-    try { 
+    try {
       if (ct.includes('json')) {
         body = JSON.parse(buf.toString('utf8'));
         if (body && typeof body.diff === 'string') {
@@ -251,22 +248,22 @@ async function handleDiffSubmit(req, res) {
 
     const base         = String(body.base_branch || 'main');
     const rawMessage   = (typeof body.message === 'string' ? body.message.trim() : '');
-    const diff         = String(body.diff || '');
+    const diff         = String(body.diff || body.diffText || '');
     const idemHeader   = String(req.headers['x-idempotency-key'] || '');
-    const idemBody     = String(body.idempotency_key || '');
+    const idemBody     = String(body.idempotency_key || body.idemKey || '');
     const idemVal      = idemHeader || idemBody || '';
 
     const ALLOWED_BRANCHES = new Set(['main', 'master', 'public']);
-	if (!ALLOWED_BRANCHES.has(base)) {
-		return sendJSON(res, 403, { ok:false, error:'branch_not_allowed' });
-	}
-    if (!diff)           return sendJSON(res, 400, { ok:false, error:'diff_required' });
+    if (!ALLOWED_BRANCHES.has(base)) {
+      return sendJSON(res, 403, { ok:false, error:'branch_not_allowed' });
+    }
+    if (!diff) return sendJSON(res, 400, { ok:false, error:'diff_required' });
 
     logDbg({ time: nowISO(), tag:'DIFF_HEAD', preview: diff.slice(0, 200) });
 
     if (containsControlBytes(diff)) return sendJSON(res, 400, { ok:false, error:'diff_contains_control_bytes' });
     const v = validateUnifiedDiff(diff);
-    if (!v.ok)                      return sendJSON(res, 400, { ok:false, error: v.error });
+    if (!v.ok) return sendJSON(res, 400, { ok:false, error: v.error });
 
     let idemPointerFile = '';
     if (idemVal) {
@@ -301,13 +298,12 @@ async function handleDiffSubmit(req, res) {
 
     logDbg({ time: nowISO(), tag:'ENQUEUED', job: path.basename(file), sha256: job.sha256, msg: job.message, idem: idemVal || null });
 
-    // Apply diff to local repository immediately
+    // Try local apply (non-fatal)
     try {
       await applyDiffToRepo(diff, rawMessage || `ChatGPT change ${nowISO()}`);
       logDbg({ time: nowISO(), tag:'APPLIED_LOCALLY', job: path.basename(file) });
     } catch (applyErr) {
       logDbg({ time: nowISO(), tag:'LOCAL_APPLY_FAILED', error: String(applyErr), job: path.basename(file) });
-      // Don't fail the request if local apply fails - the queue is still there
     }
 
     return sendJSON(res, 200, { ok:true, queued: path.basename(file), sha256: job.sha256 });
@@ -318,32 +314,17 @@ async function handleDiffSubmit(req, res) {
 async function applyDiffToRepo(diff, message) {
   const repo = REPO_ROOT;
   const patchPath = path.join(os.tmpdir(), `patch-${Date.now()}-${r4()}.patch`);
-  
+
   try {
-    // Write diff to temporary file
     await fsp.writeFile(patchPath, diff, 'utf8');
-    
-    // Ensure we're on the correct branch
     await execp('git', ['checkout', 'main'], { cwd: repo });
-    
-    // Pull latest changes
     await execp('git', ['pull', 'origin', 'main'], { cwd: repo });
-    
-    // Apply the patch
     await execp('git', ['apply', '--3way', patchPath], { cwd: repo });
-    
-    // Stage all changes
     await execp('git', ['add', '-A'], { cwd: repo });
-    
-    // Commit
     await execp('git', ['commit', '-m', message], { cwd: repo });
-    
-    // Push to remote
     await execp('git', ['push', 'origin', 'main'], { cwd: repo });
-    
     logDbg({ time: nowISO(), tag:'GIT_PUSH_SUCCESS', message });
   } finally {
-    // Clean up temp patch file
     try { await fsp.unlink(patchPath); } catch {}
   }
 }
@@ -360,7 +341,7 @@ async function handleDiffDryrun(req, res) {
     catch { return sendJSON(res, 400, { ok:false, error:'invalid_json' }); }
 
     const base_branch = body.base_branch ? String(body.base_branch) : 'main';
-    const diff = body.diff ? String(body.diff) : '';
+    const diff = body.diff ? String(body.diff) : (body.diffText ? String(body.diffText) : '');
     if (!diff) return sendJSON(res, 400, { ok:false, error:'missing diff' });
 
     const patchBuf = Buffer.from(diff, 'utf8');
@@ -391,6 +372,64 @@ async function handleDiffDryrun(req, res) {
       try { await execp('git', ['worktree', 'remove', '--force', tmpDir], { cwd: repo }); } catch {}
       return sendJSON(res, 500, { ok:false, error: e.message || String(e) });
     }
+  });
+}
+
+// NEW: /ai2/job_submit -> enqueue commands job
+function handleJobSubmit(req, res) {
+  if (!requireAuth(req, res)) return;
+
+  const ct = (req.headers['content-type'] || '').toLowerCase();
+  if (!ct.includes('application/json')) return sendJSON(res, 415, { ok:false, error:'unsupported_media_type' });
+
+  readBody(req, (err, buf) => {
+    if (err) return sendJSON(res, err.code === 413 ? 413 : 400, { ok:false, error: err.message || 'read_error' });
+
+    let body = {};
+    try { body = JSON.parse(buf.toString('utf8') || '{}'); }
+    catch { return sendJSON(res, 400, { ok:false, error:'invalid_json' }); }
+
+    const type  = String(body.type || 'commands');
+    if (type !== 'commands') return sendJSON(res, 400, { ok:false, error:'unsupported_type' });
+
+    const steps = Array.isArray(body.steps) ? body.steps : [];
+    if (steps.length === 0) return sendJSON(res, 400, { ok:false, error:'invalid_steps' });
+
+    const workdir = body.workdir ? String(body.workdir) : REPO_ROOT;
+    const idemVal = String(body.idemKey || body.idempotency_key || req.headers['x-idempotency-key'] || '');
+
+    if (idemVal) {
+      const idemFile = path.join(IDEM_DIR, `.idem-${idemSan(idemVal)}`);
+      if (fs.existsSync(idemFile)) {
+        const existing = (fs.readFileSync(idemFile) + '').trim();
+        return sendJSON(res, 200, { ok:true, duplicate_of: path.basename(existing) });
+      }
+    }
+
+    const job = {
+      schema: Number(body.schema) || 1,
+      type: 'commands',
+      workdir,
+      steps,
+      idemKey: idemVal || undefined,
+      enqueued_at: nowISO(),
+      from_endpoint: 'job_submit_action_node',
+      ip: ipOf(req),
+      ua: String(req.headers['user-agent'] || '')
+    };
+
+    const fname = `job-${ts()}-${r4()}.json`;
+    const fpath = path.join(QUEUE_DIR, fname);
+
+    try {
+      fs.writeFileSync(fpath, JSON.stringify(job));
+      if (idemVal) fs.writeFileSync(path.join(IDEM_DIR, `.idem-${idemSan(idemVal)}`), fpath);
+    } catch (e) {
+      logDbg({ time: nowISO(), tag:'QUEUE_WRITE_FAIL', error: String(e) });
+      return sendJSON(res, 500, { ok:false, error:'queue_write_failed' });
+    }
+
+    return sendJSON(res, 200, { ok:true, queued: fname, type: 'commands' });
   });
 }
 
@@ -481,7 +520,7 @@ function handler(req, res) {
   if (req.method === 'GET' && (pathname === `${BASE_URI}/health` || pathname === '/health'))
     return sendJSON(res, 200, { ok:true, time: nowISO() });
 
-  // debug (which node, passenger env)
+  // debug
   if (req.method === 'GET' && (pathname === `${BASE_URI}/debug` || pathname === '/debug'))
     return sendJSON(res, 200, {
       ok: true,
@@ -499,19 +538,23 @@ function handler(req, res) {
     return sendJSON(res, 200, { ok:true, version: rev });
   }
 
-  // echo (debug)
+  // echo
   if (req.method === 'POST' && (pathname === `${BASE_URI}/echo` || pathname === '/echo'))
     return handleEcho(req, res);
 
-  // submit diff (auth required)
+  // submit diff
   if (req.method === 'POST' && (pathname === `${BASE_URI}/diff_submit` || pathname === '/diff_submit'))
     return handleDiffSubmit(req, res);
 
-  // dryrun (no auth; safe validation only)
+  // dryrun
   if (req.method === 'POST' && (pathname === `${BASE_URI}/diff_dryrun` || pathname === '/diff_dryrun'))
     return handleDiffDryrun(req, res);
 
-  // repo browsing (auth required)
+  // submit commands job
+  if (req.method === 'POST' && (pathname === `${BASE_URI}/job_submit` || pathname === '/job_submit'))
+    return handleJobSubmit(req, res);
+
+  // repo browsing
   if (req.method === 'GET' && (
       pathname === `${BASE_URI}/repo/list` || pathname === '/repo/list' ||
       pathname === `${BASE_URI}/fs/list`   || pathname === '/fs/list'   ||
