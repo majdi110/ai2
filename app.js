@@ -311,18 +311,18 @@ async function handleDiffSubmit(req, res) {
 }
 
 // Apply diff to the local repository
-async function applyDiffToRepo(diff, message, baseBranch = "public") {
+async function applyDiffToRepo(diff, message) {
   const repo = REPO_ROOT;
   const patchPath = path.join(os.tmpdir(), `patch-${Date.now()}-${r4()}.patch`);
 
   try {
     await fsp.writeFile(patchPath, diff, 'utf8');
-    await execp('git', ['checkout', baseBranch], { cwd: repo });
-    await execp('git', ['pull', 'origin', baseBranch], { cwd: repo });
+    await execp('git', ['checkout', 'main'], { cwd: repo });
+    await execp('git', ['pull', 'origin', 'main'], { cwd: repo });
     await execp('git', ['apply', '--3way', patchPath], { cwd: repo });
     await execp('git', ['add', '-A'], { cwd: repo });
     await execp('git', ['commit', '-m', message], { cwd: repo });
-    await execp('git', ['push', 'origin', baseBranch], { cwd: repo });
+    await execp('git', ['push', 'origin', 'main'], { cwd: repo });
     logDbg({ time: nowISO(), tag:'GIT_PUSH_SUCCESS', message });
   } finally {
     try { await fsp.unlink(patchPath); } catch {}
