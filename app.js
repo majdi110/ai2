@@ -13,14 +13,19 @@
  *   POST /ai2/echo               -> debug echo; shows headers/body + decoded preview
  *
  * Actions (write):
+ *   POST /ai2/job_submit         -> enqueue a commands job (picked up by worker.sh)
  *   POST /ai2/diff_submit        -> enqueue a unified diff (plain text)
- *   POST /ai2/diff_dryrun        -> git-apply --check (no enqueue), against origin/<base_branch>
+ *   POST /ai2/diff_dryrun        -> git-apply --check (no enqueue), vs origin/<base_branch>
  *
  * Repo browsing (read-only; require token):
  *   GET  /ai2/repo/list?path=&depth=
  *   GET  /ai2/repo/get?path=relative/path
  *   Aliases: /repo/list, /repo/get, /ai2/fs/list, /ai2/fs/get, /fs/list, /fs/get
- *   Short aliases (for docs): /ai2/list, /ai2/get
+ *   Short aliases: /ai2/list, /ai2/get
+ *
+ * Queue introspection (require token):
+ *   GET  /ai2/jobs/list?state=queue|done|fail&limit=100
+ *   GET  /ai2/jobs/log?file=job-*.json[.log]&lines=200
  */
 
 const http   = require('http');
@@ -37,6 +42,9 @@ const BASE_URI     = '/ai2';
 
 const TOKEN_FILE   = '/home/genweb/agent/ACTION_TOKEN';
 const QUEUE_DIR    = '/home/genweb/agent/queue';
+const DONE_DIR     = '/home/genweb/agent/done';
+const FAIL_DIR     = '/home/genweb/agent/failures';
+const LOG_DIR      = '/home/genweb/agent/logs';
 const IDEM_DIR     = QUEUE_DIR; // idempotency markers alongside jobs
 const DEBUG_LOG    = '/home/genweb/agent/last_action_debug.log';
 
@@ -54,6 +62,9 @@ const HIDDEN_TOP  = new Set(['.git', 'node_modules', '.env']);
 
 // ----- init -----
 try { fs.mkdirSync(QUEUE_DIR, { recursive: true }); } catch {}
+try { fs.mkdirSync(DONE_DIR,  { recursive: true }); } catch {}
+try { fs.mkdirSync(FAIL_DIR,  { recursive: true }); } catch {}
+try { fs.mkdirSync(LOG_DIR,   { recursive: true }); } catch {}
 
 // Lazily load token (don't crash if unreadable)
 let ACTION_TOKEN = null;
@@ -72,6 +83,7 @@ function loadToken() {
 const nowISO  = () => new Date().toISOString();
 const ipOf    = (req) => String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '');
 const idemSan = (s) => String(s || '').replace(/[^A-Za-z0-9._:-]/g, '_');
+const safeJobBasename = (s) => String(s || '').replace(/[^A-Za-z0-9._-]/g, '');
 const ts      = () => {
   const d = new Date(), p = n => String(n).padStart(2,'0');
   return `${d.getUTCFullYear()}${p(d.getUTCMonth()+1)}${p(d.getUTCDate())}-${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}`;
@@ -158,8 +170,8 @@ function serveStatic(req, res, pathname) {
       case '.jpeg': ct = 'image/jpeg'; break;
       case '.gif':  ct = 'image/gif'; break;
       case '.webp': ct = 'image/webp'; break;
-      case '.woff': ct = 'font/woff'; break;
-      case '.woff2':ct = 'font/woff2'; break;
+      case '.woff':  ct = 'font/woff'; break;
+      case '.woff2': ct = 'font/woff2'; break;
       default: return sendText(res, 415, 'Unsupported Media Type\n');
     }
 
@@ -179,18 +191,18 @@ function validateUnifiedDiff(diff) {
   // Accept either full unified diff format OR just hunks (for testing/simple cases)
   const hasFullFormat = /^diff --git /m.test(diff);
   const hasHunkFormat = /@@ -\d+,?\d* \+\d+,?\d* @@/m.test(diff);
-  
+
   if (!hasFullFormat && !hasHunkFormat) {
     return { ok:false, error:'diff_invalid_format' };
   }
-  
-  // If it's a full format diff, do structural checks for new files
+
+  // If full format diff, do structural checks for new files
   if (hasFullFormat && /(^|\n)new file mode \d+/.test(diff)) {
     if (!/(^|\n)new file mode 100644(\r?\n)/.test(diff)) return { ok:false, error:'new_file_mode_must_be_100644' };
     if (!/(^|\n)--- \/dev\/null(\r?\n)/.test(diff))     return { ok:false, error:'new_file_requires_devnull' };
     if (!/(^|\n)\+\+\+ b\/[^\n]+(\r?\n)/.test(diff))    return { ok:false, error:'bad_plus_plus_plus_line' };
   }
-  
+
   return { ok:true };
 }
 
@@ -210,7 +222,7 @@ function handleEcho(req, res) {
     const ct = String(req.headers['content-type'] || '').toLowerCase();
 
     let body = null, preview = '';
-    try { 
+    try {
       if (ct.includes('json')) {
         body = JSON.parse(buf.toString('utf8'));
         if (body && typeof body.diff === 'string') {
@@ -229,6 +241,73 @@ function handleEcho(req, res) {
   });
 }
 
+// --- job_submit (commands) ---
+function handleJobSubmit(req, res) {
+  if (!requireAuth(req, res)) return;
+
+  const ct = (req.headers['content-type'] || '').toLowerCase();
+  if (!ct.includes('application/json')) return sendJSON(res, 415, { ok:false, error:'unsupported_media_type' });
+
+  readBody(req, (err, buf) => {
+    if (err) return sendJSON(res, err.code === 413 ? 413 : 400, { ok:false, error: err.message || 'read_error' });
+
+    // redact headers before logging
+    const hdr = { ...req.headers };
+    if (hdr.authorization) hdr.authorization = '[redacted]';
+    if (hdr['x-api-key'])  hdr['x-api-key']  = '[redacted]';
+    logDbg({ time: nowISO(), tag:'REQ', path: req.url, method: req.method, ct, ip: ipOf(req), headers: hdr });
+
+    let body = {};
+    try { body = JSON.parse(buf.toString('utf8') || '{}'); }
+    catch { return sendJSON(res, 400, { ok:false, error:'invalid_json' }); }
+
+    const type   = String(body.type || '');
+    const schema = Number(body.schema || 0);
+    const workdir = body.workdir ? String(body.workdir) : null;
+    const steps  = Array.isArray(body.steps) ? body.steps : [];
+
+    if (type !== 'commands') return sendJSON(res, 400, { ok:false, error:'unsupported_type' });
+    if (schema !== 1)        return sendJSON(res, 400, { ok:false, error:'bad_schema' });
+    if (!steps.length)       return sendJSON(res, 400, { ok:false, error:'no_steps' });
+
+    // idempotency
+    const idemHeader = String(req.headers['x-idempotency-key'] || '');
+    const idemBody   = String(body.idempotency_key || '');
+    const idemVal    = idemHeader || idemBody || '';
+
+    let idemPointerFile = '';
+    if (idemVal) {
+      const idemFile = path.join(IDEM_DIR, `.idem-${idemSan(idemVal)}`);
+      idemPointerFile = idemFile;
+      if (fs.existsSync(idemFile)) {
+        const existing = (fs.readFileSync(idemFile) + '').trim();
+        return sendJSON(res, 200, { ok:true, duplicate_of: path.basename(existing) });
+      }
+    }
+
+    const id   = `job-${ts()}-${r4()}.json`;
+    const file = path.join(QUEUE_DIR, id);
+    const job  = {
+      enqueued_at: nowISO(),
+      from_endpoint: 'job_submit_action_node',
+      ip: ipOf(req),
+      ua: String(req.headers['user-agent'] || ''),
+      type, schema, workdir, steps
+    };
+
+    try {
+      fs.writeFileSync(file, JSON.stringify(job));
+      if (idemVal && idemPointerFile) fs.writeFileSync(idemPointerFile, file);
+    } catch (e) {
+      logDbg({ time: nowISO(), tag:'QUEUE_WRITE_FAIL', error: String(e) });
+      return sendJSON(res, 500, { ok:false, error:'queue_write_failed' });
+    }
+
+    logDbg({ time: nowISO(), tag:'ENQUEUED', job: path.basename(file), type, idem: idemVal || null });
+    return sendJSON(res, 200, { ok:true, queued: path.basename(file), type });
+  });
+}
+
 async function handleDiffSubmit(req, res) {
   if (!requireAuth(req, res)) return;
 
@@ -238,7 +317,6 @@ async function handleDiffSubmit(req, res) {
   readBody(req, async (err, buf) => {
     if (err) return sendJSON(res, err.code === 413 ? 413 : 400, { ok:false, error: err.message || 'read_error' });
 
-    // redact headers before logging
     const hdr = { ...req.headers };
     if (hdr.authorization) hdr.authorization = '[redacted]';
     if (hdr['x-api-key'])  hdr['x-api-key']  = '[redacted]';
@@ -257,16 +335,14 @@ async function handleDiffSubmit(req, res) {
     const idemVal      = idemHeader || idemBody || '';
 
     const ALLOWED_BRANCHES = new Set(['main', 'master', 'public']);
-	if (!ALLOWED_BRANCHES.has(base)) {
-		return sendJSON(res, 403, { ok:false, error:'branch_not_allowed' });
-	}
-    if (!diff)           return sendJSON(res, 400, { ok:false, error:'diff_required' });
+    if (!ALLOWED_BRANCHES.has(base)) return sendJSON(res, 403, { ok:false, error:'branch_not_allowed' });
+    if (!diff) return sendJSON(res, 400, { ok:false, error:'diff_required' });
 
     logDbg({ time: nowISO(), tag:'DIFF_HEAD', preview: diff.slice(0, 200) });
 
     if (containsControlBytes(diff)) return sendJSON(res, 400, { ok:false, error:'diff_contains_control_bytes' });
     const v = validateUnifiedDiff(diff);
-    if (!v.ok)                      return sendJSON(res, 400, { ok:false, error: v.error });
+    if (!v.ok) return sendJSON(res, 400, { ok:false, error: v.error });
 
     let idemPointerFile = '';
     if (idemVal) {
@@ -301,13 +377,12 @@ async function handleDiffSubmit(req, res) {
 
     logDbg({ time: nowISO(), tag:'ENQUEUED', job: path.basename(file), sha256: job.sha256, msg: job.message, idem: idemVal || null });
 
-    // Apply diff to local repository immediately
+    // Try to apply locally (best effort)
     try {
       await applyDiffToRepo(diff, rawMessage || `ChatGPT change ${nowISO()}`);
       logDbg({ time: nowISO(), tag:'APPLIED_LOCALLY', job: path.basename(file) });
     } catch (applyErr) {
       logDbg({ time: nowISO(), tag:'LOCAL_APPLY_FAILED', error: String(applyErr), job: path.basename(file) });
-      // Don't fail the request if local apply fails - the queue is still there
     }
 
     return sendJSON(res, 200, { ok:true, queued: path.basename(file), sha256: job.sha256 });
@@ -318,32 +393,17 @@ async function handleDiffSubmit(req, res) {
 async function applyDiffToRepo(diff, message) {
   const repo = REPO_ROOT;
   const patchPath = path.join(os.tmpdir(), `patch-${Date.now()}-${r4()}.patch`);
-  
+
   try {
-    // Write diff to temporary file
     await fsp.writeFile(patchPath, diff, 'utf8');
-    
-    // Ensure we're on the correct branch
     await execp('git', ['checkout', 'main'], { cwd: repo });
-    
-    // Pull latest changes
     await execp('git', ['pull', 'origin', 'main'], { cwd: repo });
-    
-    // Apply the patch
     await execp('git', ['apply', '--3way', patchPath], { cwd: repo });
-    
-    // Stage all changes
     await execp('git', ['add', '-A'], { cwd: repo });
-    
-    // Commit
     await execp('git', ['commit', '-m', message], { cwd: repo });
-    
-    // Push to remote
     await execp('git', ['push', 'origin', 'main'], { cwd: repo });
-    
     logDbg({ time: nowISO(), tag:'GIT_PUSH_SUCCESS', message });
   } finally {
-    // Clean up temp patch file
     try { await fsp.unlink(patchPath); } catch {}
   }
 }
@@ -398,7 +458,7 @@ async function handleDiffDryrun(req, res) {
 function safeJoin(root, userPath){
   const p = path.normalize('/' + String(userPath || '').replace(/^\/+/, ''));
   const full = path.join(root, '.' + p);
-  if (!full.startsWith(root)) throw new Error('path traversal');
+  if (!full.startsWith(root)) throw new Error('path_traversal');
   return full;
 }
 function isHiddenName(n){ return n.startsWith('.') && !['.htaccess','.htpasswd'].includes(n); }
@@ -468,6 +528,85 @@ function handleRepoGet(req, res) {
   });
 }
 
+// ----- jobs list/log (read-only) -----
+function handleJobsList(req, res) {
+  if (!requireAuth(req, res)) return;
+  const parsed = url.parse(req.url, true);
+  const state = String(parsed.query.state || 'queue');
+  let limit = parseInt(String(parsed.query.limit || '100'), 10);
+  if (isNaN(limit) || limit <= 0) limit = 100;
+
+  let dir;
+  if (state === 'queue') dir = QUEUE_DIR;
+  else if (state === 'done') dir = DONE_DIR;
+  else if (state === 'fail') dir = FAIL_DIR;
+  else return sendJSON(res, 400, { ok:false, error:'bad_state' });
+
+  let items = [];
+  try {
+    items = fs.readdirSync(dir)
+      .filter(f => f.endsWith('.json'))
+      .map(f => ({ file: f, mtime: Math.floor(fs.statSync(path.join(dir, f)).mtimeMs / 1000) }))
+      .sort((a,b) => b.mtime - a.mtime)
+      .slice(0, limit);
+  } catch {
+    items = [];
+  }
+  return sendJSON(res, 200, { ok:true, state, count: items.length, items });
+}
+
+function handleJobsLog(req, res) {
+  if (!requireAuth(req, res)) return;
+  const parsed = url.parse(req.url, true);
+  const raw = String(parsed.query.file || '');
+  const fname = safeJobBasename(raw);
+  if (!fname) return sendJSON(res, 400, { ok:false, error:'bad_file' });
+
+  // If a .log is requested -> return text tail
+  if (fname.endsWith('.log')) {
+    const lines = parseInt(String(parsed.query.lines || '200'), 10) || 200;
+    const logPath = path.join(LOG_DIR, fname);
+    try {
+      if (!fs.existsSync(logPath) || !fs.statSync(logPath).isFile()) return sendJSON(res, 400, { ok:false, error:'bad_file' });
+      const buf = fs.readFileSync(logPath, 'utf8');
+      const arr = buf.split(/\r?\n/);
+      const tail = arr.slice(-lines).join('\n');
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=UTF-8' });
+      return res.end(tail);
+    } catch {
+      return sendJSON(res, 500, { ok:false, error:'read_error' });
+    }
+  }
+
+  // If a .json job file is requested -> return raw JSON from state dirs
+  if (fname.endsWith('.json')) {
+    const candidates = [
+      path.join(DONE_DIR, fname),
+      path.join(FAIL_DIR, fname),
+      path.join(QUEUE_DIR, fname),
+    ];
+    let found = null;
+    for (const p of candidates) {
+      try {
+        if (fs.existsSync(p) && fs.statSync(p).isFile()) { found = p; break; }
+      } catch {}
+    }
+    if (!found) return sendJSON(res, 400, { ok:false, error:'bad_file' });
+    try {
+      const text = fs.readFileSync(found, 'utf8');
+      let obj;
+      try { obj = JSON.parse(text); }
+      catch { return sendJSON(res, 422, { ok:false, error:'invalid_json_in_job' }); }
+      return sendJSON(res, 200, obj);
+    } catch {
+      return sendJSON(res, 500, { ok:false, error:'read_error' });
+    }
+  }
+
+  // Anything else is invalid
+  return sendJSON(res, 400, { ok:false, error:'bad_file' });
+}
+
 // ----- router -----
 function handler(req, res) {
   const pathname = url.parse(req.url).pathname || '';
@@ -503,6 +642,10 @@ function handler(req, res) {
   if (req.method === 'POST' && (pathname === `${BASE_URI}/echo` || pathname === '/echo'))
     return handleEcho(req, res);
 
+  // submit commands job (auth required)
+  if (req.method === 'POST' && (pathname === `${BASE_URI}/job_submit` || pathname === '/job_submit'))
+    return handleJobSubmit(req, res);
+
   // submit diff (auth required)
   if (req.method === 'POST' && (pathname === `${BASE_URI}/diff_submit` || pathname === '/diff_submit'))
     return handleDiffSubmit(req, res);
@@ -523,6 +666,12 @@ function handler(req, res) {
       pathname === `${BASE_URI}/fs/get`    || pathname === '/fs/get'    ||
       pathname === `${BASE_URI}/get`
     )) return handleRepoGet(req, res);
+
+  // jobs (auth required) — ADDED ABOVE 404
+  if (req.method === 'GET' && (pathname === `${BASE_URI}/jobs/list` || pathname === '/jobs/list'))
+    return handleJobsList(req, res);
+  if (req.method === 'GET' && (pathname === `${BASE_URI}/jobs/log` || pathname === '/jobs/log'))
+    return handleJobsLog(req, res);
 
   // root banner
   if (req.method === 'GET' && (pathname === `${BASE_URI}/` || pathname === '/'))
