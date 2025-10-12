@@ -300,7 +300,7 @@ async function handleDiffSubmit(req, res) {
 
     // Try local apply (non-fatal)
     try {
-      await applyDiffToRepo(diff, rawMessage || `ChatGPT change ${nowISO()}`, base)}`);
+      await applyDiffToRepo(diff, rawMessage || `ChatGPT change ${nowISO()}`);
       logDbg({ time: nowISO(), tag:'APPLIED_LOCALLY', job: path.basename(file) });
     } catch (applyErr) {
       logDbg({ time: nowISO(), tag:'LOCAL_APPLY_FAILED', error: String(applyErr), job: path.basename(file) });
@@ -311,4 +311,276 @@ async function handleDiffSubmit(req, res) {
 }
 
 // Apply diff to the local repository
-async function applyDiffToRepo(diff, message, baseBranch = 'public') {
+async function applyDiffToRepo(diff, message) {
+  const repo = REPO_ROOT;
+  const patchPath = path.join(os.tmpdir(), `patch-${Date.now()}-${r4()}.patch`);
+
+  try {
+    await fsp.writeFile(patchPath, diff, 'utf8');
+    await execp('git', ['checkout', 'main'], { cwd: repo });
+    await execp('git', ['pull', 'origin', 'main'], { cwd: repo });
+    await execp('git', ['apply', '--3way', patchPath], { cwd: repo });
+    await execp('git', ['add', '-A'], { cwd: repo });
+    await execp('git', ['commit', '-m', message], { cwd: repo });
+    await execp('git', ['push', 'origin', 'main'], { cwd: repo });
+    logDbg({ time: nowISO(), tag:'GIT_PUSH_SUCCESS', message });
+  } finally {
+    try { await fsp.unlink(patchPath); } catch {}
+  }
+}
+
+async function handleDiffDryrun(req, res) {
+  const ct = (req.headers['content-type'] || '').toLowerCase();
+  if (!ct.includes('application/json')) return sendJSON(res, 415, { ok:false, error:'unsupported_media_type' });
+
+  readBody(req, async (err, buf) => {
+    if (err) return sendJSON(res, err.code === 413 ? 413 : 400, { ok:false, error: err.message || 'read_error' });
+
+    let body = {};
+    try { body = JSON.parse(buf.toString('utf8') || '{}'); }
+    catch { return sendJSON(res, 400, { ok:false, error:'invalid_json' }); }
+
+    const base_branch = body.base_branch ? String(body.base_branch) : 'main';
+    const diff = body.diff ? String(body.diff) : (body.diffText ? String(body.diffText) : '');
+    if (!diff) return sendJSON(res, 400, { ok:false, error:'missing diff' });
+
+    const patchBuf = Buffer.from(diff, 'utf8');
+    if (patchBuf.length > 5 * 1024 * 1024) return sendJSON(res, 413, { ok:false, error:'patch too large (>5MB)' });
+
+    const v = validateUnifiedDiff(diff);
+    if (!v.ok) return sendJSON(res, 400, { ok:false, error: v.error });
+
+    const repo = __dirname;
+    const tmpDir = path.join(os.tmpdir(), `ai2-dryrun-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    try {
+      await fsp.mkdir(tmpDir, { recursive:true });
+      await execp('git', ['fetch', '--depth=1', 'origin', base_branch], { cwd: repo });
+      await execp('git', ['worktree', 'add', '--detach', '--force', tmpDir, `origin/${base_branch}`], { cwd: repo });
+
+      const patchPath = path.join(tmpDir, 'incoming.patch');
+      await fsp.writeFile(patchPath, patchBuf);
+
+      try {
+        await execp('git', ['apply', '--check', '--3way', '--unsafe-paths', patchPath], { cwd: tmpDir });
+        return sendJSON(res, 200, { ok:true });
+      } catch (e) {
+        return sendJSON(res, 422, { ok:false, error:'git apply --check failed', detail: e.stderr || e.stdout || String(e) });
+      } finally {
+        try { await execp('git', ['worktree', 'remove', '--force', tmpDir], { cwd: repo }); } catch {}
+      }
+    } catch (e) {
+      try { await execp('git', ['worktree', 'remove', '--force', tmpDir], { cwd: repo }); } catch {}
+      return sendJSON(res, 500, { ok:false, error: e.message || String(e) });
+    }
+  });
+}
+
+// NEW: /ai2/job_submit -> enqueue commands job
+function handleJobSubmit(req, res) {
+  if (!requireAuth(req, res)) return;
+
+  const ct = (req.headers['content-type'] || '').toLowerCase();
+  if (!ct.includes('application/json')) return sendJSON(res, 415, { ok:false, error:'unsupported_media_type' });
+
+  readBody(req, (err, buf) => {
+    if (err) return sendJSON(res, err.code === 413 ? 413 : 400, { ok:false, error: err.message || 'read_error' });
+
+    let body = {};
+    try { body = JSON.parse(buf.toString('utf8') || '{}'); }
+    catch { return sendJSON(res, 400, { ok:false, error:'invalid_json' }); }
+
+    const type  = String(body.type || 'commands');
+    if (type !== 'commands') return sendJSON(res, 400, { ok:false, error:'unsupported_type' });
+
+    const steps = Array.isArray(body.steps) ? body.steps : [];
+    if (steps.length === 0) return sendJSON(res, 400, { ok:false, error:'invalid_steps' });
+
+    const workdir = body.workdir ? String(body.workdir) : REPO_ROOT;
+    const idemVal = String(body.idemKey || body.idempotency_key || req.headers['x-idempotency-key'] || '');
+
+    if (idemVal) {
+      const idemFile = path.join(IDEM_DIR, `.idem-${idemSan(idemVal)}`);
+      if (fs.existsSync(idemFile)) {
+        const existing = (fs.readFileSync(idemFile) + '').trim();
+        return sendJSON(res, 200, { ok:true, duplicate_of: path.basename(existing) });
+      }
+    }
+
+    const job = {
+      schema: Number(body.schema) || 1,
+      type: 'commands',
+      workdir,
+      steps,
+      idemKey: idemVal || undefined,
+      enqueued_at: nowISO(),
+      from_endpoint: 'job_submit_action_node',
+      ip: ipOf(req),
+      ua: String(req.headers['user-agent'] || '')
+    };
+
+    const fname = `job-${ts()}-${r4()}.json`;
+    const fpath = path.join(QUEUE_DIR, fname);
+
+    try {
+      fs.writeFileSync(fpath, JSON.stringify(job));
+      if (idemVal) fs.writeFileSync(path.join(IDEM_DIR, `.idem-${idemSan(idemVal)}`), fpath);
+    } catch (e) {
+      logDbg({ time: nowISO(), tag:'QUEUE_WRITE_FAIL', error: String(e) });
+      return sendJSON(res, 500, { ok:false, error:'queue_write_failed' });
+    }
+
+    return sendJSON(res, 200, { ok:true, queued: fname, type: 'commands' });
+  });
+}
+
+// ----- repo browsing (read-only) -----
+function safeJoin(root, userPath){
+  const p = path.normalize('/' + String(userPath || '').replace(/^\/+/, ''));
+  const full = path.join(root, '.' + p);
+  if (!full.startsWith(root)) throw new Error('path traversal');
+  return full;
+}
+function isHiddenName(n){ return n.startsWith('.') && !['.htaccess','.htpasswd'].includes(n); }
+
+function handleRepoList(req, res) {
+  if (!requireAuth(req, res)) return;
+
+  const parsed = url.parse(req.url, true);
+  const rel = String(parsed.query.path || '');
+  let depth = parseInt(String(parsed.query.depth || '1'), 10);
+  if (isNaN(depth) || depth < 0) depth = 1;
+  if (depth > LIST_MAX_DEPTH) depth = LIST_MAX_DEPTH;
+
+  let root;
+  try { root = safeJoin(REPO_ROOT, rel); }
+  catch { return sendJSON(res, 400, { ok:false, error:'bad path' }); }
+
+  if (!fs.existsSync(root)) return sendJSON(res, 200, { ok:true, path: rel, items: [] });
+
+  function walk(dir, d, prefix) {
+    const out = [];
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (HIDDEN_DIRS.has(e.name) || HIDDEN_TOP.has(e.name) || isHiddenName(e.name)) continue;
+      const abs = path.join(dir, e.name);
+      const relp = path.posix.join(prefix, e.name);
+      try {
+        const st = fs.statSync(abs);
+        out.push({
+          path: relp,
+          type: e.isDirectory() ? 'dir' : 'file',
+          size: st.size,
+          mtime: Math.floor(st.mtimeMs / 1000)
+        });
+        if (e.isDirectory() && d > 0) out.push(...walk(abs, d - 1, relp));
+      } catch {}
+    }
+    return out;
+  }
+
+  const prefix = rel.replace(/^\/+/, '');
+  return sendJSON(res, 200, { ok:true, path: rel, items: walk(root, depth, prefix) });
+}
+
+function handleRepoGet(req, res) {
+  if (!requireAuth(req, res)) return;
+
+  const parsed = url.parse(req.url, true);
+  const rel = String(parsed.query.path || '');
+
+  let abs;
+  try { abs = safeJoin(REPO_ROOT, rel); }
+  catch { return sendJSON(res, 400, { ok:false, error:'bad path' }); }
+
+  if (!fs.existsSync(abs)) return sendJSON(res, 404, { ok:false, error:'not found' });
+
+  const st = fs.statSync(abs);
+  if (!st.isFile()) return sendJSON(res, 400, { ok:false, error:'not a file' });
+  if (st.size > GET_MAX_BYTES) return sendJSON(res, 413, { ok:false, error:'file too large', limit: GET_MAX_BYTES });
+
+  const buf = fs.readFileSync(abs);
+  return sendJSON(res, 200, {
+    ok: true,
+    path: rel,
+    size: buf.length,
+    mtime: Math.floor(st.mtimeMs / 1000),
+    content_b64: buf.toString('base64')
+  });
+}
+
+// ----- router -----
+function handler(req, res) {
+  const pathname = url.parse(req.url).pathname || '';
+
+  // serve static first
+  if (serveStatic(req, res, pathname)) return;
+
+  // health
+  if (req.method === 'GET' && (pathname === `${BASE_URI}/_health` || pathname === '/_health'))
+    return sendJSON(res, 200, { ok:true, time: nowISO() });
+  if (req.method === 'GET' && (pathname === `${BASE_URI}/health` || pathname === '/health'))
+    return sendJSON(res, 200, { ok:true, time: nowISO() });
+
+  // debug
+  if (req.method === 'GET' && (pathname === `${BASE_URI}/debug` || pathname === '/debug'))
+    return sendJSON(res, 200, {
+      ok: true,
+      underPassenger: !!process.env.PASSENGER_APP_ENV,
+      node: process.version,
+      port: process.env.PORT || process.env.PASSENGER_PORT || null,
+      cwd: process.cwd(),
+      time: nowISO()
+    });
+
+  // version
+  if (req.method === 'GET' && (pathname === `${BASE_URI}/version` || pathname === '/version')) {
+    let rev = 'unknown';
+    try { rev = fs.readFileSync(VERSION_FILE, 'utf8').trim(); } catch {}
+    return sendJSON(res, 200, { ok:true, version: rev });
+  }
+
+  // echo
+  if (req.method === 'POST' && (pathname === `${BASE_URI}/echo` || pathname === '/echo'))
+    return handleEcho(req, res);
+
+  // submit diff
+  if (req.method === 'POST' && (pathname === `${BASE_URI}/diff_submit` || pathname === '/diff_submit'))
+    return handleDiffSubmit(req, res);
+
+  // dryrun
+  if (req.method === 'POST' && (pathname === `${BASE_URI}/diff_dryrun` || pathname === '/diff_dryrun'))
+    return handleDiffDryrun(req, res);
+
+  // submit commands job
+  if (req.method === 'POST' && (pathname === `${BASE_URI}/job_submit` || pathname === '/job_submit'))
+    return handleJobSubmit(req, res);
+
+  // repo browsing
+  if (req.method === 'GET' && (
+      pathname === `${BASE_URI}/repo/list` || pathname === '/repo/list' ||
+      pathname === `${BASE_URI}/fs/list`   || pathname === '/fs/list'   ||
+      pathname === `${BASE_URI}/list`
+    )) return handleRepoList(req, res);
+
+  if (req.method === 'GET' && (
+      pathname === `${BASE_URI}/repo/get`  || pathname === '/repo/get'  ||
+      pathname === `${BASE_URI}/fs/get`    || pathname === '/fs/get'    ||
+      pathname === `${BASE_URI}/get`
+    )) return handleRepoGet(req, res);
+
+  // root banner
+  if (req.method === 'GET' && (pathname === `${BASE_URI}/` || pathname === '/'))
+    return sendText(res, 200, 'OK (ai2)\n');
+
+  // fallback
+  return sendText(res, 404, 'Not Found\n');
+}
+
+// ----- start server (Passenger sets PORT) -----
+process.on('uncaughtException', e => console.error('[ai2] uncaughtException:', e));
+process.on('unhandledRejection', e => console.error('[ai2] unhandledRejection:', e));
+console.log(`[ai2] starting with Node ${process.version}, PORT=${process.env.PORT || '(none)'} at ${nowISO()}`);
+
+const PORT = process.env.PORT || 3000;
+http.createServer(handler).listen(PORT, () => {
+  logDbg({ tag: 'boot', time: nowISO(), msg: `listening PORT=${PORT}` });
+});
