@@ -39,7 +39,7 @@ const path   = require('path');
 const crypto = require('crypto');
 const url    = require('url');
 const os     = require('os');
-const { execFile } = require('child_process');
+const { execFile, execFileSync } = require('child_process');
 
 // ----- config -----
 const BASE_URI     = '/ai2';
@@ -725,6 +725,11 @@ function handler(req, res) {
   if (req.method === 'POST' && (pathname === `${BASE_URI}/job/cancel` || pathname === '/job/cancel'))
     return handleJobCancel(req, res);
 
+  // nice-to-have: redirect /ai2 -> /ai2/ (keeps your existing banner on /ai2/)
+  if (req.method === 'GET' && pathname === BASE_URI) {
+    res.writeHead(301, { Location: `${BASE_URI}/` });
+    return res.end();
+  }
   // root banner
   if (req.method === 'GET' && (pathname === `${BASE_URI}/` || pathname === '/'))
     return sendText(res, 200, 'OK (ai2)\n');
