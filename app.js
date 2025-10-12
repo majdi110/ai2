@@ -4,32 +4,32 @@
  * BeloCloud Actions mini-server (no external deps).
  *
  * Public:
- *   GET  /ai2/                   -> "OK (ai2)"
- *   GET  /ai2/_health            -> { ok:true, time }
- *   GET  /ai2/health             -> alias of /ai2/_health
- *   GET  /ai2/version            -> { ok:true, version }
- *   GET  /ai2/static/<file>      -> serve ./public/<file> (wide, safe types)
- *   GET  /ai2/debug              -> debug info (node version, env)
- *   POST /ai2/echo               -> debug echo; shows headers/body + decoded preview
+ *   GET/HEAD  /ai2/                 -> "OK (ai2)"
+ *   GET/HEAD  /ai2/_health          -> { ok:true, time }
+ *   GET/HEAD  /ai2/health           -> alias of /ai2/_health
+ *   GET/HEAD  /ai2/version          -> { ok:true, version }
+ *   GET/HEAD  /ai2/static/<file>    -> serve ./public/<file> (wide, safe types)
+ *   GET/HEAD  /ai2/debug            -> debug info (node version, env)
+ *   POST      /ai2/echo             -> debug echo; shows headers/body + decoded preview
  *
  * Actions (write):
- *   POST /ai2/job_submit         -> enqueue a commands job (picked by worker)
- *   POST /ai2/diff_submit        -> enqueue a unified diff (plain text)
- *   POST /ai2/diff_dryrun        -> git-apply --check (no enqueue), vs origin/<base_branch>
+ *   POST /ai2/job_submit            -> enqueue a commands job (picked by worker)
+ *   POST /ai2/diff_submit           -> enqueue a unified diff (plain text)
+ *   POST /ai2/diff_dryrun           -> git-apply --check (no enqueue), vs origin/<base_branch>
  *
  * Repo browsing (read-only; require token):
- *   GET  /ai2/repo/list?path=&depth=
- *   GET  /ai2/repo/get?path=relative/path
+ *   GET /ai2/repo/list?path=&depth=
+ *   GET /ai2/repo/get?path=relative/path
  *   Aliases: /repo/list, /repo/get, /ai2/fs/list, /ai2/fs/get, /fs/list, /fs/get
  *   Short aliases: /ai2/list, /ai2/get
  *
  * Queue introspection (require token):
- *   GET  /ai2/jobs/list?state=queue|done|fail&limit=100
- *   GET  /ai2/jobs/log?file=job-*.json[.log]&lines=200
+ *   GET /ai2/jobs/list?state=queue|done|fail&limit=100
+ *   GET /ai2/jobs/log?file=job-*.json[.log]&lines=200
  *
  * Queue ops (require token):
- *   POST /ai2/job/requeue        -> requeue a job from failures/done
- *   POST /ai2/job/cancel         -> cancel a queued job (move to failures with mark)
+ *   POST /ai2/job/requeue           -> requeue a job from failures/done
+ *   POST /ai2/job/cancel            -> cancel a queued job (move to failures with mark)
  */
 
 const http   = require('http');
@@ -379,7 +379,17 @@ async function applyDiffToRepo(diff, message, baseBranch = 'public') {
     await execp('git', ['pull', 'origin', baseBranch], { cwd: repo });
     await execp('git', ['apply', '--3way', patchPath], { cwd: repo });
     await execp('git', ['add', '-A'], { cwd: repo });
-    await execp('git', ['commit', '-m', message], { cwd: repo });
+
+    // Commit only if there are staged changes
+    let hasChanges = true;
+    try {
+      await execp('git', ['diff', '--cached', '--quiet'], { cwd: repo });
+      hasChanges = false; // exit 0 => no staged changes
+    } catch { hasChanges = true; }
+
+    if (hasChanges) {
+      await execp('git', ['commit', '-m', message], { cwd: repo });
+    }
     await execp('git', ['push', 'origin', baseBranch], { cwd: repo });
     logDbg({ time: nowISO(), tag:'GIT_PUSH_SUCCESS', message, baseBranch });
   } finally {
@@ -581,76 +591,11 @@ function handleJobsLog(req, res) {
   return sendJSON(res, 400, { ok:false, error:'bad_file' });
 }
 
-// ----- queue ops: requeue / cancel (write; auth) -----
-function readJsonFile(p) {
-  const txt = fs.readFileSync(p, 'utf8');
-  return JSON.parse(txt);
-}
-
-function handleJobRequeue(req, res) {
-  if (!requireAuth(req, res)) return;
-  const ct = (req.headers['content-type'] || '').toLowerCase();
-  if (!ct.includes('application/json')) return sendJSON(res, 415, { ok:false, error:'unsupported_media_type' });
-
-  readBody(req, (err, buf) => {
-    if (err) return sendJSON(res, 400, { ok:false, error: 'read_error' });
-    let body = {};
-    try { body = JSON.parse(buf.toString('utf8') || '{}'); } catch { return sendJSON(res, 400, { ok:false, error:'invalid_json' }); }
-    const fname = safeJobBasename(String(body.file || ''));
-    if (!fname || !fname.endsWith('.json')) return sendJSON(res, 400, { ok:false, error:'bad_file' });
-
-    const srcCandidates = [ path.join(FAIL_DIR, fname), path.join(DONE_DIR, fname) ];
-    let src = null;
-    for (const p of srcCandidates) { if (fs.existsSync(p) && fs.statSync(p).isFile()) { src = p; break; } }
-    if (!src) return sendJSON(res, 404, { ok:false, error:'not_found' });
-
-    let payload;
-    try { payload = readJsonFile(src); } catch { return sendJSON(res, 422, { ok:false, error:'invalid_json_in_job' }); }
-    const newId = `job-${ts()}-${r4()}.json`;
-    const dst   = path.join(QUEUE_DIR, newId);
-    try {
-      delete payload.completed_at;
-      delete payload.failed_at;
-      payload.requeued_from = fname;
-      payload.requeued_at   = nowISO();
-      fs.writeFileSync(dst, JSON.stringify(payload));
-    } catch {
-      return sendJSON(res, 500, { ok:false, error:'queue_write_failed' });
-    }
-    return sendJSON(res, 200, { ok:true, queued: newId, from: path.basename(src) });
-  });
-}
-
-function handleJobCancel(req, res) {
-  if (!requireAuth(req, res)) return;
-  const ct = (req.headers['content-type'] || '').toLowerCase();
-  if (!ct.includes('application/json')) return sendJSON(res, 415, { ok:false, error:'unsupported_media_type' });
-
-  readBody(req, (err, buf) => {
-    if (err) return sendJSON(res, 400, { ok:false, error:'read_error' });
-    let body = {};
-    try { body = JSON.parse(buf.toString('utf8') || '{}'); } catch { return sendJSON(res, 400, { ok:false, error:'invalid_json' }); }
-    const fname = safeJobBasename(String(body.file || ''));
-    if (!fname || !fname.endsWith('.json')) return sendJSON(res, 400, { ok:false, error:'bad_file' });
-
-    const qPath = path.join(QUEUE_DIR, fname);
-    if (!fs.existsSync(qPath) || !fs.statSync(qPath).isFile())
-      return sendJSON(res, 404, { ok:false, error:'not_in_queue' });
-
-    let payload;
-    try { payload = readJsonFile(qPath); } catch { return sendJSON(res, 422, { ok:false, error:'invalid_json_in_job' }); }
-    payload.cancelled_at = nowISO();
-    payload.cancel_reason = String(body.reason || 'cancelled_by_api');
-
-    try {
-      fs.writeFileSync(qPath, JSON.stringify(payload));
-      const dst = path.join(FAIL_DIR, fname);
-      fs.renameSync(qPath, dst);
-      return sendJSON(res, 200, { ok:true, cancelled: fname });
-    } catch {
-      return sendJSON(res, 500, { ok:false, error:'cancel_failed' });
-    }
-  });
+// ----- tiny route matcher -----
+// Matches either `${BASE_URI}${p}` or bare `${p}`; supports GET/HEAD.
+function isRoute(req, pathname, methods, p) {
+  const okMethod = Array.isArray(methods) ? methods.includes(req.method) : req.method === methods;
+  return okMethod && (pathname === `${BASE_URI}${p}` || pathname === p);
 }
 
 // ----- router -----
@@ -661,13 +606,13 @@ function handler(req, res) {
   if (serveStatic(req, res, pathname)) return;
 
   // health
-  if (req.method === 'GET' && (pathname === `${BASE_URI}/_health` || pathname === '/_health'))
+  if (isRoute(req, pathname, ['GET','HEAD'], '/_health'))
     return sendJSON(res, 200, { ok:true, time: nowISO() });
-  if (req.method === 'GET' && (pathname === `${BASE_URI}/health` || pathname === '/health'))
+  if (isRoute(req, pathname, ['GET','HEAD'], '/health'))
     return sendJSON(res, 200, { ok:true, time: nowISO() });
 
-  // debug
-  if (req.method === 'GET' && (pathname === `${BASE_URI}/debug` || pathname === '/debug'))
+  // debug (GET only)
+  if (isRoute(req, pathname, 'GET', '/debug'))
     return sendJSON(res, 200, {
       ok: true,
       underPassenger: !!process.env.PASSENGER_APP_ENV,
@@ -677,66 +622,65 @@ function handler(req, res) {
       time: nowISO()
     });
 
-  // version
-  if (req.method === 'GET' && (pathname === `${BASE_URI}/version` || pathname === '/version')) {
-    let rev = 'unknown';
+  // version (reads VERSION.txt; falls back to git rev)
+  if (isRoute(req, pathname, ['GET','HEAD'], '/version')) {
+    let rev = '';
     try { rev = fs.readFileSync(VERSION_FILE, 'utf8').trim(); } catch {}
-    return sendJSON(res, 200, { ok:true, version: rev });
+    if (!rev) {
+      try { rev = execFileSync('git', ['rev-parse','--short','HEAD'], { cwd: REPO_ROOT, encoding: 'utf8' }).trim(); }
+      catch { rev = 'unknown'; }
+    }
+    return sendJSON(res, 200, { ok:true, version: rev || 'unknown' });
   }
 
   // echo
-  if (req.method === 'POST' && (pathname === `${BASE_URI}/echo` || pathname === '/echo'))
+  if (isRoute(req, pathname, 'POST', '/echo'))
     return handleEcho(req, res);
 
   // submit commands job
-  if (req.method === 'POST' && (pathname === `${BASE_URI}/job_submit` || pathname === '/job_submit'))
+  if (isRoute(req, pathname, 'POST', '/job_submit'))
     return handleJobSubmit(req, res);
 
   // submit diff
-  if (req.method === 'POST' && (pathname === `${BASE_URI}/diff_submit` || pathname === '/diff_submit'))
+  if (isRoute(req, pathname, 'POST', '/diff_submit'))
     return handleDiffSubmit(req, res);
 
   // dryrun (no auth)
-  if (req.method === 'POST' && (pathname === `${BASE_URI}/diff_dryrun` || pathname === '/diff_dryrun'))
+  if (isRoute(req, pathname, 'POST', '/diff_dryrun'))
     return handleDiffDryrun(req, res);
 
-  // repo browsing
-  if (req.method === 'GET' && (
-      pathname === `${BASE_URI}/repo/list` || pathname === '/repo/list' ||
-      pathname === `${BASE_URI}/fs/list`   || pathname === '/fs/list'   ||
-      pathname === `${BASE_URI}/list`
-    )) return handleRepoList(req, res);
+  // repo browsing (list)
+  if (
+    isRoute(req, pathname, 'GET', '/repo/list') ||
+    isRoute(req, pathname, 'GET', '/fs/list')   ||
+    isRoute(req, pathname, 'GET', '/list')
+  ) return handleRepoList(req, res);
 
-  if (req.method === 'GET' && (
-      pathname === `${BASE_URI}/repo/get`  || pathname === '/repo/get'  ||
-      pathname === `${BASE_URI}/fs/get`    || pathname === '/fs/get'    ||
-      pathname === `${BASE_URI}/get`
-    )) return handleRepoGet(req, res);
+  // repo browsing (get)
+  if (
+    isRoute(req, pathname, 'GET', '/repo/get') ||
+    isRoute(req, pathname, 'GET', '/fs/get')   ||
+    isRoute(req, pathname, 'GET', '/get')
+  ) return handleRepoGet(req, res);
 
   // jobs
-  if (req.method === 'GET' && (pathname === `${BASE_URI}/jobs/list` || pathname === '/jobs/list'))
+  if (isRoute(req, pathname, 'GET', '/jobs/list'))
     return handleJobsList(req, res);
-  if (req.method === 'GET' && (pathname === `${BASE_URI}/jobs/log` || pathname === '/jobs/log'))
+  if (isRoute(req, pathname, 'GET', '/jobs/log'))
     return handleJobsLog(req, res);
 
   // queue ops
-  if (req.method === 'POST' && (pathname === `${BASE_URI}/job/requeue` || pathname === '/job/requeue'))
+  if (isRoute(req, pathname, 'POST', '/job/requeue'))
     return handleJobRequeue(req, res);
-  if (req.method === 'POST' && (pathname === `${BASE_URI}/job/cancel` || pathname === '/job/cancel'))
+  if (isRoute(req, pathname, 'POST', '/job/cancel'))
     return handleJobCancel(req, res);
 
-  // nice-to-have: redirect /ai2 -> /ai2/ (keeps your existing banner on /ai2/)
-  if (req.method === 'GET' && pathname === BASE_URI) {
-    res.writeHead(301, { Location: `${BASE_URI}/` });
-    return res.end();
-  }
-  // nice-to-have: redirect /ai2 -> /ai2/ (keeps your existing banner on /ai2/)
-  if (req.method === 'GET' && pathname === BASE_URI) {
-    res.writeHead(301, { Location: `${BASE_URI}/` });
-    return res.end();
-  }
+  // redirect /ai2 -> /ai2/
+  if (isRoute(req, pathname, ['GET','HEAD'], ''))
+    if (pathname === BASE_URI) { res.writeHead(301, { Location: `${BASE_URI}/` }); return res.end(); }
+
   // root banner
-  if (req.method === 'GET' && (pathname === `${BASE_URI}/` || pathname === '/'))
+  if ((req.method === 'GET' || req.method === 'HEAD') && (pathname === `${BASE_URI}/` || pathname === '/'))
     return sendText(res, 200, 'OK (ai2)\n');
 
   // fallback
