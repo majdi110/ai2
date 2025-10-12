@@ -8,14 +8,14 @@
  *   GET  /ai2/_health            -> { ok:true, time }
  *   GET  /ai2/health             -> alias of /ai2/_health
  *   GET  /ai2/version            -> { ok:true, version }
- *   GET  /ai2/static/<file>      -> serve ./public/<file>
+ *   GET  /ai2/static/<file>      -> serve ./public/<file> (wide, safe types)
  *   GET  /ai2/debug              -> debug info (node version, env)
  *   POST /ai2/echo               -> debug echo; shows headers/body + decoded preview
  *
- * Actions (write; require token unless noted):
- *   POST /ai2/job_submit         -> enqueue a commands job (picked up by worker.sh)
- *   POST /ai2/diff_submit        -> enqueue a unified diff (applies locally best-effort)
- *   POST /ai2/diff_dryrun        -> git-apply --check (no enqueue)  [no auth]
+ * Actions (write):
+ *   POST /ai2/job_submit         -> enqueue a commands job (picked by worker)
+ *   POST /ai2/diff_submit        -> enqueue a unified diff (plain text)
+ *   POST /ai2/diff_dryrun        -> git-apply --check (no enqueue), vs origin/<base_branch>
  *
  * Repo browsing (read-only; require token):
  *   GET  /ai2/repo/list?path=&depth=
@@ -23,11 +23,11 @@
  *   Aliases: /repo/list, /repo/get, /ai2/fs/list, /ai2/fs/get, /fs/list, /fs/get
  *   Short aliases: /ai2/list, /ai2/get
  *
- * Queue introspection (read-only; require token):
+ * Queue introspection (require token):
  *   GET  /ai2/jobs/list?state=queue|done|fail&limit=100
  *   GET  /ai2/jobs/log?file=job-*.json[.log]&lines=200
  *
- * Queue ops (write; require token):
+ * Queue ops (require token):
  *   POST /ai2/job/requeue        -> requeue a job from failures/done
  *   POST /ai2/job/cancel         -> cancel a queued job (move to failures with mark)
  */
@@ -70,7 +70,7 @@ try { fs.mkdirSync(DONE_DIR,  { recursive: true }); } catch {}
 try { fs.mkdirSync(FAIL_DIR,  { recursive: true }); } catch {}
 try { fs.mkdirSync(LOG_DIR,   { recursive: true }); } catch {}
 
-// Lazily load token (don't crash if unreadable)
+// Lazily load token (don’t crash if unreadable)
 let ACTION_TOKEN = null;
 function loadToken() {
   if (ACTION_TOKEN) return ACTION_TOKEN;
@@ -158,26 +158,15 @@ function serveStatic(req, res, pathname) {
     if (!fs.existsSync(real) || !fs.statSync(real).isFile()) { sendText(res, 404, 'Not Found\n'); return true; }
 
     const ext = path.extname(real).toLowerCase();
-    let ct;
-    switch (ext) {
-      case '.html':
-      case '.htm':  ct = 'text/html; charset=UTF-8'; break;
-      case '.css':  ct = 'text/css; charset=UTF-8'; break;
-      case '.js':   ct = 'application/javascript; charset=UTF-8'; break;
-      case '.json': ct = 'application/json; charset=UTF-8'; break;
-      case '.txt':
-      case '.log':  ct = 'text/plain; charset=UTF-8'; break;
-      case '.ico':  ct = 'image/x-icon'; break;
-      case '.svg':  ct = 'image/svg+xml'; break;
-      case '.png':  ct = 'image/png'; break;
-      case '.jpg':
-      case '.jpeg': ct = 'image/jpeg'; break;
-      case '.gif':  ct = 'image/gif'; break;
-      case '.webp': ct = 'image/webp'; break;
-      case '.woff':  ct = 'font/woff'; break;
-      case '.woff2': ct = 'font/woff2'; break;
-      default: return sendText(res, 415, 'Unsupported Media Type\n');
-    }
+    const map = {
+      '.html':'text/html; charset=UTF-8','.htm':'text/html; charset=UTF-8',
+      '.css':'text/css; charset=UTF-8','.js':'application/javascript; charset=UTF-8',
+      '.json':'application/json; charset=UTF-8','.txt':'text/plain; charset=UTF-8',
+      '.log':'text/plain; charset=UTF-8','.ico':'image/x-icon','.svg':'image/svg+xml',
+      '.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.gif':'image/gif',
+      '.webp':'image/webp','.woff':'font/woff','.woff2':'font/woff2'
+    };
+    const ct = map[ext]; if (!ct) return sendText(res, 415, 'Unsupported Media Type\n');
 
     const data = fs.readFileSync(real);
     res.writeHead(200, { 'Content-Type': ct, 'Cache-Control': 'no-cache' });
@@ -195,10 +184,7 @@ function validateUnifiedDiff(diff) {
   // Accept either full unified diff format OR just hunks (for testing/simple cases)
   const hasFullFormat = /^diff --git /m.test(diff);
   const hasHunkFormat = /@@ -\d+,?\d* \+\d+,?\d* @@/m.test(diff);
-
-  if (!hasFullFormat && !hasHunkFormat) {
-    return { ok:false, error:'diff_invalid_format' };
-  }
+  if (!hasFullFormat && !hasHunkFormat) return { ok:false, error:'diff_invalid_format' };
 
   // If full format diff, do structural checks for new files
   if (hasFullFormat && /(^|\n)new file mode \d+/.test(diff)) {
@@ -206,7 +192,6 @@ function validateUnifiedDiff(diff) {
     if (!/(^|\n)--- \/dev\/null(\r?\n)/.test(diff))     return { ok:false, error:'new_file_requires_devnull' };
     if (!/(^|\n)\+\+\+ b\/[^\n]+(\r?\n)/.test(diff))    return { ok:false, error:'bad_plus_plus_plus_line' };
   }
-
   return { ok:true };
 }
 
@@ -229,13 +214,10 @@ function handleEcho(req, res) {
     try {
       if (ct.includes('json')) {
         body = JSON.parse(buf.toString('utf8'));
-        if (body && typeof body.diff === 'string') {
-          preview = body.diff.slice(0, 200);
-        }
+        if (body && typeof body.diff === 'string') preview = body.diff.slice(0, 200);
       }
     } catch {}
 
-    // redact headers before logging
     const hdr = { ...req.headers };
     if (hdr.authorization) hdr.authorization = '[redacted]';
     if (hdr['x-api-key'])  hdr['x-api-key']  = '[redacted]';
@@ -248,14 +230,12 @@ function handleEcho(req, res) {
 // --- job_submit (commands) ---
 function handleJobSubmit(req, res) {
   if (!requireAuth(req, res)) return;
-
   const ct = (req.headers['content-type'] || '').toLowerCase();
   if (!ct.includes('application/json')) return sendJSON(res, 415, { ok:false, error:'unsupported_media_type' });
 
   readBody(req, (err, buf) => {
     if (err) return sendJSON(res, err.code === 413 ? 413 : 400, { ok:false, error: err.message || 'read_error' });
 
-    // redact headers before logging
     const hdr = { ...req.headers };
     if (hdr.authorization) hdr.authorization = '[redacted]';
     if (hdr['x-api-key'])  hdr['x-api-key']  = '[redacted]';
@@ -274,7 +254,6 @@ function handleJobSubmit(req, res) {
     if (schema !== 1)        return sendJSON(res, 400, { ok:false, error:'bad_schema' });
     if (!steps.length)       return sendJSON(res, 400, { ok:false, error:'no_steps' });
 
-    // idempotency
     const idemHeader = String(req.headers['x-idempotency-key'] || '');
     const idemBody   = String(body.idempotency_key || '');
     const idemVal    = idemHeader || idemBody || '';
@@ -296,8 +275,7 @@ function handleJobSubmit(req, res) {
       from_endpoint: 'job_submit_action_node',
       ip: ipOf(req),
       ua: String(req.headers['user-agent'] || ''),
-      type, schema, workdir, steps,
-      idemKey: idemVal || undefined
+      type, schema, workdir, steps
     };
 
     try {
@@ -315,7 +293,6 @@ function handleJobSubmit(req, res) {
 
 async function handleDiffSubmit(req, res) {
   if (!requireAuth(req, res)) return;
-
   const ct = (req.headers['content-type'] || '').toLowerCase();
   if (!ct.includes('application/json')) return sendJSON(res, 415, { ok:false, error:'unsupported_media_type' });
 
@@ -332,7 +309,7 @@ async function handleDiffSubmit(req, res) {
     try { body = JSON.parse(buf.toString('utf8') || '{}'); }
     catch { return sendJSON(res, 400, { ok:false, error:'invalid_json' }); }
 
-    const base         = String(body.base_branch || 'public'); // default to public per Plan A
+    const base         = String(body.base_branch || 'public'); // default to public
     const rawMessage   = (typeof body.message === 'string' ? body.message.trim() : '');
     const diff         = String(body.diff || '');
     const idemHeader   = String(req.headers['x-idempotency-key'] || '');
@@ -380,25 +357,22 @@ async function handleDiffSubmit(req, res) {
       return sendJSON(res, 500, { ok:false, error:'queue_write_failed' });
     }
 
-    logDbg({ time: nowISO(), tag:'ENQUEUED', job: path.basename(file), sha256: job.sha256, msg: job.message, idem: idemVal || null });
-
-    // Try to apply locally (best effort)
+    // Best-effort local apply to REPO_ROOT on the same branch
     try {
       await applyDiffToRepo(diff, rawMessage || `ChatGPT change ${nowISO()}`, base);
-      logDbg({ time: nowISO(), tag:'APPLIED_LOCALLY', job: path.basename(file) });
+      logDbg({ time: nowISO(), tag:'APPLIED_LOCALLY', job: path.basename(file), base });
     } catch (applyErr) {
-      logDbg({ time: nowISO(), tag:'LOCAL_APPLY_FAILED', error: String(applyErr), job: path.basename(file) });
+      logDbg({ time: nowISO(), tag:'LOCAL_APPLY_FAILED', error: String(applyErr), job: path.basename(file), base });
     }
 
     return sendJSON(res, 200, { ok:true, queued: path.basename(file), sha256: job.sha256 });
   });
 }
 
-// Apply diff to the local repository (with branch selection)
+// Apply diff to the local repository (branch-aware)
 async function applyDiffToRepo(diff, message, baseBranch = 'public') {
   const repo = REPO_ROOT;
   const patchPath = path.join(os.tmpdir(), `patch-${Date.now()}-${r4()}.patch`);
-
   try {
     await fsp.writeFile(patchPath, diff, 'utf8');
     await execp('git', ['checkout', baseBranch], { cwd: repo });
@@ -407,7 +381,7 @@ async function applyDiffToRepo(diff, message, baseBranch = 'public') {
     await execp('git', ['add', '-A'], { cwd: repo });
     await execp('git', ['commit', '-m', message], { cwd: repo });
     await execp('git', ['push', 'origin', baseBranch], { cwd: repo });
-    logDbg({ time: nowISO(), tag:'GIT_PUSH_SUCCESS', message, branch: baseBranch });
+    logDbg({ time: nowISO(), tag:'GIT_PUSH_SUCCESS', message, baseBranch });
   } finally {
     try { await fsp.unlink(patchPath); } catch {}
   }
@@ -554,9 +528,7 @@ function handleJobsList(req, res) {
       .map(f => ({ file: f, mtime: Math.floor(fs.statSync(path.join(dir, f)).mtimeMs / 1000) }))
       .sort((a,b) => b.mtime - a.mtime)
       .slice(0, limit);
-  } catch {
-    items = [];
-  }
+  } catch { items = []; }
   return sendJSON(res, 200, { ok:true, state, count: items.length, items });
 }
 
@@ -567,12 +539,12 @@ function handleJobsLog(req, res) {
   const fname = safeJobBasename(raw);
   if (!fname) return sendJSON(res, 400, { ok:false, error:'bad_file' });
 
-  // If a .log is requested -> return text tail
+  // .log -> tail text
   if (fname.endsWith('.log')) {
     const lines = parseInt(String(parsed.query.lines || '200'), 10) || 200;
     const logPath = path.join(LOG_DIR, fname);
     try {
-      if (!fs.existsSync(logPath) || !fs.statSync(logPath).isFile()) return sendJSON(res, 400, { ok:false, error:'bad_file' });
+      if (!fs.existsSync(logPath) || !fs.statSync(logPath).isFile()) return sendJSON(res, 404, { ok:false, error:'not_found' });
       const buf = fs.readFileSync(logPath, 'utf8');
       const arr = buf.split(/\r?\n/);
       const tail = arr.slice(-lines).join('\n');
@@ -583,7 +555,7 @@ function handleJobsLog(req, res) {
     }
   }
 
-  // If a .json job file is requested -> return raw JSON from state dirs
+  // .json -> return job JSON from any state dir
   if (fname.endsWith('.json')) {
     const candidates = [
       path.join(DONE_DIR, fname),
@@ -591,12 +563,10 @@ function handleJobsLog(req, res) {
       path.join(QUEUE_DIR, fname),
     ];
     let found = null;
-    for (const p of candidates) {
-      try {
-        if (fs.existsSync(p) && fs.statSync(p).isFile()) { found = p; break; }
-      } catch {}
+    for (const pth of candidates) {
+      try { if (fs.existsSync(pth) && fs.statSync(pth).isFile()) { found = pth; break; } } catch {}
     }
-    if (!found) return sendJSON(res, 400, { ok:false, error:'bad_file' });
+    if (!found) return sendJSON(res, 404, { ok:false, error:'not_found' });
     try {
       const text = fs.readFileSync(found, 'utf8');
       let obj;
@@ -608,7 +578,6 @@ function handleJobsLog(req, res) {
     }
   }
 
-  // Anything else is invalid
   return sendJSON(res, 400, { ok:false, error:'bad_file' });
 }
 
@@ -622,6 +591,7 @@ function handleJobRequeue(req, res) {
   if (!requireAuth(req, res)) return;
   const ct = (req.headers['content-type'] || '').toLowerCase();
   if (!ct.includes('application/json')) return sendJSON(res, 415, { ok:false, error:'unsupported_media_type' });
+
   readBody(req, (err, buf) => {
     if (err) return sendJSON(res, 400, { ok:false, error: 'read_error' });
     let body = {};
@@ -629,13 +599,11 @@ function handleJobRequeue(req, res) {
     const fname = safeJobBasename(String(body.file || ''));
     if (!fname || !fname.endsWith('.json')) return sendJSON(res, 400, { ok:false, error:'bad_file' });
 
-    // Look for the job in failures first, then done.
     const srcCandidates = [ path.join(FAIL_DIR, fname), path.join(DONE_DIR, fname) ];
     let src = null;
     for (const p of srcCandidates) { if (fs.existsSync(p) && fs.statSync(p).isFile()) { src = p; break; } }
     if (!src) return sendJSON(res, 404, { ok:false, error:'not_found' });
 
-    // Load payload, write a new job into queue with fresh id; keep original (don’t destroy history).
     let payload;
     try { payload = readJsonFile(src); } catch { return sendJSON(res, 422, { ok:false, error:'invalid_json_in_job' }); }
     const newId = `job-${ts()}-${r4()}.json`;
@@ -657,6 +625,7 @@ function handleJobCancel(req, res) {
   if (!requireAuth(req, res)) return;
   const ct = (req.headers['content-type'] || '').toLowerCase();
   if (!ct.includes('application/json')) return sendJSON(res, 415, { ok:false, error:'unsupported_media_type' });
+
   readBody(req, (err, buf) => {
     if (err) return sendJSON(res, 400, { ok:false, error:'read_error' });
     let body = {};
@@ -688,7 +657,7 @@ function handleJobCancel(req, res) {
 function handler(req, res) {
   const pathname = url.parse(req.url).pathname || '';
 
-  // serve static first
+  // static first
   if (serveStatic(req, res, pathname)) return;
 
   // health
@@ -697,7 +666,7 @@ function handler(req, res) {
   if (req.method === 'GET' && (pathname === `${BASE_URI}/health` || pathname === '/health'))
     return sendJSON(res, 200, { ok:true, time: nowISO() });
 
-  // debug (which node, passenger env)
+  // debug
   if (req.method === 'GET' && (pathname === `${BASE_URI}/debug` || pathname === '/debug'))
     return sendJSON(res, 200, {
       ok: true,
@@ -715,23 +684,23 @@ function handler(req, res) {
     return sendJSON(res, 200, { ok:true, version: rev });
   }
 
-  // echo (debug)
+  // echo
   if (req.method === 'POST' && (pathname === `${BASE_URI}/echo` || pathname === '/echo'))
     return handleEcho(req, res);
 
-  // submit commands job (auth required)
+  // submit commands job
   if (req.method === 'POST' && (pathname === `${BASE_URI}/job_submit` || pathname === '/job_submit'))
     return handleJobSubmit(req, res);
 
-  // submit diff (auth required)
+  // submit diff
   if (req.method === 'POST' && (pathname === `${BASE_URI}/diff_submit` || pathname === '/diff_submit'))
     return handleDiffSubmit(req, res);
 
-  // dryrun (no auth; safe validation only)
+  // dryrun (no auth)
   if (req.method === 'POST' && (pathname === `${BASE_URI}/diff_dryrun` || pathname === '/diff_dryrun'))
     return handleDiffDryrun(req, res);
 
-  // repo browsing (auth required)
+  // repo browsing
   if (req.method === 'GET' && (
       pathname === `${BASE_URI}/repo/list` || pathname === '/repo/list' ||
       pathname === `${BASE_URI}/fs/list`   || pathname === '/fs/list'   ||
@@ -744,13 +713,13 @@ function handler(req, res) {
       pathname === `${BASE_URI}/get`
     )) return handleRepoGet(req, res);
 
-  // jobs (auth required)
+  // jobs
   if (req.method === 'GET' && (pathname === `${BASE_URI}/jobs/list` || pathname === '/jobs/list'))
     return handleJobsList(req, res);
   if (req.method === 'GET' && (pathname === `${BASE_URI}/jobs/log` || pathname === '/jobs/log'))
     return handleJobsLog(req, res);
 
-  // queue ops (auth required)
+  // queue ops
   if (req.method === 'POST' && (pathname === `${BASE_URI}/job/requeue` || pathname === '/job/requeue'))
     return handleJobRequeue(req, res);
   if (req.method === 'POST' && (pathname === `${BASE_URI}/job/cancel` || pathname === '/job/cancel'))
@@ -764,7 +733,7 @@ function handler(req, res) {
   return sendText(res, 404, 'Not Found\n');
 }
 
-// ----- start server (Passenger sets PORT) -----
+// ----- start server -----
 process.on('uncaughtException', e => console.error('[ai2] uncaughtException:', e));
 process.on('unhandledRejection', e => console.error('[ai2] unhandledRejection:', e));
 console.log(`[ai2] starting with Node ${process.version}, PORT=${process.env.PORT || '(none)'} at ${nowISO()}`);
