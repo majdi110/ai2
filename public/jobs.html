@@ -1,0 +1,59 @@
+<!doctype html><meta charset="utf-8">
+<title>AI2 Jobs</title>
+<style>
+ body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:16px}
+ .row{display:flex;gap:12px;align-items:center;margin-bottom:8px}
+ table{border-collapse:collapse;width:100%;margin-top:12px}
+ th,td{border:1px solid #ddd;padding:6px 8px;font-size:14px}
+ pre{background:#111;color:#eee;padding:10px;white-space:pre-wrap}
+ code{white-space:pre-wrap}
+ .muted{color:#666}
+</style>
+<h1>AI2 Jobs</h1>
+<div class="row">
+  <label>Token:</label><input id="tok" type="password" style="width:380px">
+  <label>State:</label>
+  <select id="state"><option>queue</option><option selected>done</option><option>fail</option></select>
+  <label>Limit:</label><input id="lim" type="number" value="25" style="width:70px">
+  <button id="load">Load</button>
+</div>
+<table id="tbl"><thead><tr><th>File</th><th>mtime</th><th>Actions</th></tr></thead><tbody></tbody></table>
+<h3 class="muted">Job JSON</h3>
+<pre id="json"><code class="muted">(select a job)</code></pre>
+<h3 class="muted">Log tail</h3>
+<pre id="log"><code class="muted">(select a job)</code></pre>
+<script>
+const base = location.origin + "/ai2";
+const $ = (id)=>document.getElementById(id);
+function hh(s){return String(s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+async function api(path){
+  const tok = $('tok').value.trim();
+  const r = await fetch(base+path,{headers:{'x-api-key':tok||''}});
+  if(!r.ok) throw new Error('HTTP '+r.status); return r.json();
+}
+async function load(){
+  const st=$('state').value; const lim=$('lim').value||25;
+  const data=await api(`/jobs/list?state=${encodeURIComponent(st)}&limit=${encodeURIComponent(lim)}`);
+  const tb=$('tbl').querySelector('tbody'); tb.innerHTML='';
+  (data.items||[]).forEach(it=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${hh(it.file)}</td><td>${it.mtime}</td>
+      <td><button data-f="${hh(it.file)}" class="btn-json">JSON</button>
+          <button data-f="${hh(it.file)}" class="btn-log">Log</button></td>`;
+    tb.appendChild(tr);
+  });
+}
+$('load').onclick=load;
+document.addEventListener('click',async e=>{
+  const f=e.target?.dataset?.f; if(!f) return;
+  const tok=$('tok').value.trim();
+  if(e.target.classList.contains('btn-json')){
+    const j=await fetch(base+`/jobs/log?file=${encodeURIComponent(f)}`,{headers:{'x-api-key':tok}}).then(r=>r.json());
+    $('json').textContent=JSON.stringify(j,null,2);
+  }
+  if(e.target.classList.contains('btn-log')){
+    const t=await fetch(base+`/jobs/log?file=${encodeURIComponent(f)}.log&lines=120`,{headers:{'x-api-key':tok}}).then(r=>r.text());
+    $('log').textContent=t;
+  }
+});
+</script>
