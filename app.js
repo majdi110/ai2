@@ -730,6 +730,11 @@ function handler(req, res) {
     res.writeHead(301, { Location: `${BASE_URI}/` });
     return res.end();
   }
+  // nice-to-have: redirect /ai2 -> /ai2/ (keeps your existing banner on /ai2/)
+  if (req.method === 'GET' && pathname === BASE_URI) {
+    res.writeHead(301, { Location: `${BASE_URI}/` });
+    return res.end();
+  }
   // root banner
   if (req.method === 'GET' && (pathname === `${BASE_URI}/` || pathname === '/'))
     return sendText(res, 200, 'OK (ai2)\n');
