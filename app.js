@@ -696,3 +696,7 @@ const PORT = process.env.PORT || 3000;
 http.createServer(handler).listen(PORT, () => {
   logDbg({ tag: 'boot', time: nowISO(), msg: `listening PORT=${PORT}` });
 });
+
+// ---- queue ops stubs (added by fix) ----
+function handleJobRequeue(_req, res){ sendJSON(res, 501, { ok:false, error:'not_implemented' }); }
+function handleJobCancel (_req, res){ sendJSON(res, 501, { ok:false, error:'not_implemented' }); }
