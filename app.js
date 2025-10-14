@@ -12,10 +12,9 @@
  *   GET/HEAD  /ai2/debug            -> debug info (node version, env)
  *   POST      /ai2/echo             -> debug echo; shows headers/body + decoded preview
  *
- * Actions (write):
+ * Actions (write; require token):
  *   POST /ai2/job_submit            -> enqueue a commands job (picked by worker)
- *   POST /ai2/diff_submit           -> enqueue a unified diff (plain text)
- *   POST /ai2/diff_dryrun           -> git-apply --check (no enqueue), vs origin/<base_branch>
+ *   POST /ai2/diff_submit           -> enqueue a unified diff (as type=patch, schema=1)
  *
  * Repo browsing (read-only; require token):
  *   GET /ai2/repo/list?path=&depth=
@@ -27,9 +26,9 @@
  *   GET /ai2/jobs/list?state=queue|done|fail&limit=100
  *   GET /ai2/jobs/log?file=job-*.json[.log]&lines=200
  *
- * Queue ops (require token):
- *   POST /ai2/job/requeue           -> requeue a job from failures/done
- *   POST /ai2/job/cancel            -> cancel a queued job (move to failures with mark)
+ * Queue ops (stubs; require token):
+ *   POST /ai2/job/requeue
+ *   POST /ai2/job/cancel
  */
 
 const http   = require('http');
@@ -65,10 +64,9 @@ const HIDDEN_DIRS = new Set(['.git', 'node_modules', '.cache', '.cpanel', '.tras
 const HIDDEN_TOP  = new Set(['.git', 'node_modules', '.env']);
 
 // ----- init -----
-try { fs.mkdirSync(QUEUE_DIR, { recursive: true }); } catch {}
-try { fs.mkdirSync(DONE_DIR,  { recursive: true }); } catch {}
-try { fs.mkdirSync(FAIL_DIR,  { recursive: true }); } catch {}
-try { fs.mkdirSync(LOG_DIR,   { recursive: true }); } catch {}
+for (const d of [QUEUE_DIR, DONE_DIR, FAIL_DIR, LOG_DIR]) {
+  try { fs.mkdirSync(d, { recursive: true }); } catch {}
+}
 
 // Lazily load token (don’t crash if unreadable)
 let ACTION_TOKEN = null;
@@ -179,7 +177,6 @@ function serveStatic(req, res, pathname) {
 
 // diff validation helpers
 function containsControlBytes(s) { return /[\x00-\x08\x0B\x0C\x0E-\x1F]/.test(s); }
-
 function validateUnifiedDiff(diff) {
   // Accept either full unified diff format OR just hunks (for testing/simple cases)
   const hasFullFormat = /^diff --git /m.test(diff);
@@ -204,7 +201,7 @@ function execp(cmd, args, opts={}) {
   });
 }
 
-// ----- endpoints (write) -----
+// ----- endpoints (public) -----
 function handleEcho(req, res) {
   readBody(req, (err, buf) => {
     if (err) return sendJSON(res, err.code === 413 ? 413 : 400, { ok:false, error: err.message || 'read_error' });
@@ -227,7 +224,7 @@ function handleEcho(req, res) {
   });
 }
 
-// --- job_submit (commands) ---
+// ----- endpoints (write; require auth) -----
 function handleJobSubmit(req, res) {
   if (!requireAuth(req, res)) return;
   const ct = (req.headers['content-type'] || '').toLowerCase();
@@ -245,10 +242,10 @@ function handleJobSubmit(req, res) {
     try { body = JSON.parse(buf.toString('utf8') || '{}'); }
     catch { return sendJSON(res, 400, { ok:false, error:'invalid_json' }); }
 
-    const type   = String(body.type || '');
-    const schema = Number(body.schema || 0);
+    const type    = String(body.type || '');
+    const schema  = Number(body.schema || 0);
     const workdir = body.workdir ? String(body.workdir) : null;
-    const steps  = Array.isArray(body.steps) ? body.steps : [];
+    const steps   = Array.isArray(body.steps) ? body.steps : [];
 
     if (type !== 'commands') return sendJSON(res, 400, { ok:false, error:'unsupported_type' });
     if (schema !== 1)        return sendJSON(res, 400, { ok:false, error:'bad_schema' });
@@ -343,6 +340,8 @@ async function handleDiffSubmit(req, res) {
       from_endpoint: 'diff_submit_action_node',
       ip: ipOf(req),
       ua: String(req.headers['user-agent'] || ''),
+      type: 'patch',                     // ← key: mark as patch for the worker
+      schema: 1,                         // ← keep schema consistent
       base_branch: base,
       message: (rawMessage || `ChatGPT change ${nowISO()}`),
       diff,
@@ -357,7 +356,7 @@ async function handleDiffSubmit(req, res) {
       return sendJSON(res, 500, { ok:false, error:'queue_write_failed' });
     }
 
-    // Best-effort local apply to REPO_ROOT on the same branch
+    // Best-effort local apply to REPO_ROOT on the same branch (does not affect queue)
     try {
       await applyDiffToRepo(diff, rawMessage || `ChatGPT change ${nowISO()}`, base);
       logDbg({ time: nowISO(), tag:'APPLIED_LOCALLY', job: path.basename(file), base });
@@ -365,7 +364,7 @@ async function handleDiffSubmit(req, res) {
       logDbg({ time: nowISO(), tag:'LOCAL_APPLY_FAILED', error: String(applyErr), job: path.basename(file), base });
     }
 
-    return sendJSON(res, 200, { ok:true, queued: path.basename(file), sha256: job.sha256 });
+    return sendJSON(res, 200, { ok:true, queued: path.basename(file), type: 'patch', sha256: job.sha256 });
   });
 }
 
@@ -443,7 +442,7 @@ async function handleDiffDryrun(req, res) {
   });
 }
 
-// ----- repo browsing (read-only) -----
+// ----- repo browsing (read-only; require auth) -----
 function safeJoin(root, userPath){
   const p = path.normalize('/' + String(userPath || '').replace(/^\/+/, ''));
   const full = path.join(root, '.' + p);
@@ -517,7 +516,7 @@ function handleRepoGet(req, res) {
   });
 }
 
-// ----- jobs list/log (read-only) -----
+// ----- jobs list/log (read-only; require auth) -----
 function handleJobsList(req, res) {
   if (!requireAuth(req, res)) return;
   const parsed = url.parse(req.url, true);
@@ -549,10 +548,22 @@ function handleJobsLog(req, res) {
   const fname = safeJobBasename(raw);
   if (!fname) return sendJSON(res, 400, { ok:false, error:'bad_file' });
 
-  // .log -> tail text
+  // .log -> tail text (primary: LOG_DIR/fname; optionally allow agent subdirs via raw)
   if (fname.endsWith('.log')) {
     const lines = parseInt(String(parsed.query.lines || '200'), 10) || 200;
-    const logPath = path.join(LOG_DIR, fname);
+    let logPath = path.join(LOG_DIR, fname);
+
+    // Optional: allow done/<name>.log or failures/<name>.log if it resolves under allowed roots
+    try {
+      if (raw.includes('/')) {
+        const abs = fs.realpathSync(path.join('/home/genweb/agent', raw));
+        const allowedRoots = [LOG_DIR, DONE_DIR, FAIL_DIR].map(r => fs.realpathSync(r));
+        if (allowedRoots.some(r => abs.startsWith(r + path.sep))) {
+          logPath = abs;
+        }
+      }
+    } catch { /* fallback to LOG_DIR/fname */ }
+
     try {
       if (!fs.existsSync(logPath) || !fs.statSync(logPath).isFile()) return sendJSON(res, 404, { ok:false, error:'not_found' });
       const buf = fs.readFileSync(logPath, 'utf8');
@@ -565,7 +576,7 @@ function handleJobsLog(req, res) {
     }
   }
 
-  // .json -> return job JSON from any state dir
+  // .json -> return job JSON from any state dir (by filename only)
   if (fname.endsWith('.json')) {
     const candidates = [
       path.join(DONE_DIR, fname),
@@ -591,8 +602,12 @@ function handleJobsLog(req, res) {
   return sendJSON(res, 400, { ok:false, error:'bad_file' });
 }
 
+// ----- queue ops (stubs; require auth) -----
+function handleJobRequeue(_req, res){ if (!requireAuth(_req, res)) return; sendJSON(res, 501, { ok:false, error:'not_implemented' }); }
+function handleJobCancel (_req, res){ if (!requireAuth(_req, res)) return; sendJSON(res, 501, { ok:false, error:'not_implemented' }); }
+
 // ----- tiny route matcher -----
-// Matches either `${BASE_URI}${p}` or bare `${p}`; supports GET/HEAD.
+// Matches either ${BASE_URI}${p} or bare ${p}; supports GET/HEAD/POST.
 function isRoute(req, pathname, methods, p) {
   const okMethod = Array.isArray(methods) ? methods.includes(req.method) : req.method === methods;
   return okMethod && (pathname === `${BASE_URI}${p}` || pathname === p);
@@ -696,7 +711,3 @@ const PORT = process.env.PORT || 3000;
 http.createServer(handler).listen(PORT, () => {
   logDbg({ tag: 'boot', time: nowISO(), msg: `listening PORT=${PORT}` });
 });
-
-// ---- queue ops stubs (added by fix) ----
-function handleJobRequeue(_req, res){ sendJSON(res, 501, { ok:false, error:'not_implemented' }); }
-function handleJobCancel (_req, res){ sendJSON(res, 501, { ok:false, error:'not_implemented' }); }
