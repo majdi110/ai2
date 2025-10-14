@@ -340,8 +340,8 @@ async function handleDiffSubmit(req, res) {
       from_endpoint: 'diff_submit_action_node',
       ip: ipOf(req),
       ua: String(req.headers['user-agent'] || ''),
-      type: 'patch',                     // ← key: mark as patch for the worker
-      schema: 1,                         // ← keep schema consistent
+      type: 'patch',            // <-- add
+      schema: 1,                // <-- add
       base_branch: base,
       message: (rawMessage || `ChatGPT change ${nowISO()}`),
       diff,
