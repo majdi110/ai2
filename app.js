@@ -8,8 +8,8 @@
  *   GET/HEAD  /ai2/_health          -> { ok:true, time }
  *   GET/HEAD  /ai2/health           -> alias of /ai2/_health
  *   GET/HEAD  /ai2/version          -> { ok:true, version }
- *   GET/HEAD  /ai2/static/<file>    -> serve ./public/<file> (wide, safe types)
- *   GET/HEAD  /ai2/debug            -> debug info (node version, env)
+ *   GET/HEAD  /ai2/static/<file>    -> serve ./public/<file> (safe types)
+ *   GET       /ai2/debug            -> debug info (node version, env)
  *   POST      /ai2/echo             -> debug echo; shows headers/body + decoded preview
  *
  * Actions (write; require token):
@@ -44,6 +44,7 @@ const { execFile, execFileSync } = require('child_process');
 let Sentry = null;
 try {
   // Only loads if installed; safe to skip otherwise
+  // eslint-disable-next-line import/no-extraneous-dependencies
   Sentry = require('@sentry/node');
 
   const integrations = [];
@@ -54,20 +55,20 @@ try {
   }
 
   Sentry.init({
-    dsn: process.env.SENTRY_DSN || undefined,      // set via systemd env or skip
+    dsn: process.env.SENTRY_DSN || undefined,
     environment: process.env.SENTRY_ENV || 'production',
     integrations,
     tracesSampleRate: 0.0
   });
 
-  process.on('uncaughtException', (e) => { try { Sentry.captureException(e); } catch {} });
+  process.on('uncaughtException', (e) => { try { Sentry.captureException(e); } catch (err) {} });
   process.on('unhandledRejection', (r) => {
-    try { Sentry.captureException(r instanceof Error ? r : new Error(String(r))); } catch {}
+    try { Sentry.captureException(r instanceof Error ? r : new Error(String(r))); } catch (err) {}
   });
 
   console.info('[ai2] Sentry initialized');
 } catch (e) {
-  console.warn('[ai2] Sentry not loaded (optional):', e && e.message ? e.message : e);
+  // Optional; ignore if not installed
 }
 /* ---------------- end Sentry ---------------- */
 
@@ -96,7 +97,7 @@ const HIDDEN_TOP  = new Set(['.git', 'node_modules', '.env']);
 
 // ----- init -----
 for (const d of [QUEUE_DIR, DONE_DIR, FAIL_DIR, LOG_DIR]) {
-  try { fs.mkdirSync(d, { recursive: true }); } catch {}
+  try { fs.mkdirSync(d, { recursive: true }); } catch (e) {}
 }
 
 // Lazily load token (don’t crash if unreadable)
@@ -114,7 +115,7 @@ function loadToken() {
 
 // ----- helpers -----
 const nowISO  = () => new Date().toISOString();
-const ipOf    = (req) => String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '');
+const ipOf    = (req) => String(req.headers['x-forwarded-for'] || req.socket && req.socket.remoteAddress || '');
 const idemSan = (s) => String(s || '').replace(/[^A-Za-z0-9._:-]/g, '_');
 const safeJobBasename = (s) => String(s || '').replace(/[^A-Za-z0-9._-]/g, '');
 const ts      = () => {
@@ -128,7 +129,7 @@ const logDbg  = (objOrStr) => {
   try {
     const line = typeof objOrStr === 'string' ? objOrStr : JSON.stringify(objOrStr);
     fs.appendFileSync(DEBUG_LOG, line + '\n');
-  } catch {}
+  } catch (e) {}
 };
 
 function sendJSON(res, code, obj) {
@@ -156,6 +157,16 @@ function requireAuth(req, res) {
   return true;
 }
 
+// run a process (Promise)
+function execp(cmd, args, opts={}) {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, { maxBuffer: 16*1024*1024, ...(opts||{}) }, (err, stdout, stderr) => {
+      if (err) { err.stdout = String(stdout||''); err.stderr = String(stderr||''); return reject(err); }
+      resolve({ stdout: String(stdout||''), stderr: String(stderr||'') });
+    });
+  });
+}
+
 // read entire request body (size-guarded)
 function readBody(req, cb) {
   let n = 0; const chunks = [];
@@ -163,7 +174,7 @@ function readBody(req, cb) {
     n += c.length;
     if (n > MAX_BYTES) {
       const e = Object.assign(new Error('payload_too_large'), { code: 413 });
-      cb(e); try { req.destroy(); } catch {}
+      cb(e); try { req.destroy(); } catch (er) {}
       return;
     }
     chunks.push(c);
@@ -181,9 +192,15 @@ function serveStatic(req, res, pathname) {
   const safeRel = rel0.split('/').filter(seg => seg && seg !== '.' && seg !== '..').join('/');
   const file = path.join(STATIC_ROOT, safeRel);
 
-  
-if (!real.startsWith(STATIC_ROOT)) { sendText(res, 403, 'Forbidden\n'); return true; }
-    if (!fs.existsSync(real) || !fs.statSync(real).isFile()) { sendText(res, 404, 'Not Found\n'); return true; }
+  try {
+    // SAFE: 404 for missing files before realpathSync (avoid throw -> 500)
+    if (!fs.existsSync(file)) { sendText(res, 404, 'Not Found\n'); return true; }
+
+    const real = fs.realpathSync(file);
+    if (!real.startsWith(STATIC_ROOT)) { sendText(res, 403, 'Forbidden\n'); return true; }
+
+    const st = fs.statSync(real);
+    if (!st.isFile()) { sendText(res, 404, 'Not Found\n'); return true; }
 
     const ext = path.extname(real).toLowerCase();
     const map = {
@@ -199,7 +216,7 @@ if (!real.startsWith(STATIC_ROOT)) { sendText(res, 403, 'Forbidden\n'); return t
     const data = fs.readFileSync(real);
     res.writeHead(200, { 'Content-Type': ct, 'Cache-Control': 'no-cache' });
     if (req.method === 'HEAD') res.end(); else res.end(data);
-  } catch {
+  } catch (e) {
     sendText(res, 500, 'Static error\n');
   }
   return true;
@@ -222,15 +239,6 @@ function validateUnifiedDiff(diff) {
   return { ok:true };
 }
 
-function execp(cmd, args, opts={}) {
-  return new Promise((resolve, reject) => {
-    execFile(cmd, args, { maxBuffer: 16*1024*1024, ...(opts||{}) }, (err, stdout, stderr) => {
-      if (err) { err.stdout = String(stdout||''); err.stderr = String(stderr||''); return reject(err); }
-      resolve({ stdout: String(stdout||''), stderr: String(stderr||'') });
-    });
-  });
-}
-
 // ----- endpoints (public) -----
 function handleEcho(req, res) {
   readBody(req, (err, buf) => {
@@ -243,7 +251,7 @@ function handleEcho(req, res) {
         body = JSON.parse(buf.toString('utf8'));
         if (body && typeof body.diff === 'string') preview = body.diff.slice(0, 200);
       }
-    } catch {}
+    } catch (e) {}
 
     const hdr = { ...req.headers };
     if (hdr.authorization) hdr.authorization = '[redacted]';
@@ -270,7 +278,7 @@ function handleJobSubmit(req, res) {
 
     let body = {};
     try { body = JSON.parse(buf.toString('utf8') || '{}'); }
-    catch { return sendJSON(res, 400, { ok:false, error:'invalid_json' }); }
+    catch (e) { return sendJSON(res, 400, { ok:false, error:'invalid_json' }); }
 
     const type    = String(body.type || '');
     const schema  = Number(body.schema || 0);
@@ -326,7 +334,7 @@ function handleJobSubmit(req, res) {
           Sentry.captureMessage(`AI2 job enqueued: ${path.basename(file)}`, 'info');
         });
       }
-    } catch {}
+    } catch (e) {}
 
     return sendJSON(res, 200, { ok:true, queued: path.basename(file), type });
   });
@@ -348,7 +356,7 @@ async function handleDiffSubmit(req, res) {
 
     let body = {};
     try { body = JSON.parse(buf.toString('utf8') || '{}'); }
-    catch { return sendJSON(res, 400, { ok:false, error:'invalid_json' }); }
+    catch (e) { return sendJSON(res, 400, { ok:false, error:'invalid_json' }); }
 
     const base         = String(body.base_branch || 'public'); // default to public
     const rawMessage   = (typeof body.message === 'string' ? body.message.trim() : '');
@@ -415,7 +423,7 @@ async function handleDiffSubmit(req, res) {
           Sentry.captureMessage(`AI2 patch enqueued: ${path.basename(file)}`, 'info');
         });
       }
-    } catch {}
+    } catch (e) {}
 
     // Best-effort local apply to REPO_ROOT on the same branch (does not affect queue)
     try {
@@ -423,7 +431,7 @@ async function handleDiffSubmit(req, res) {
       logDbg({ time: nowISO(), tag:'APPLIED_LOCALLY', job: path.basename(file), base });
     } catch (applyErr) {
       logDbg({ time: nowISO(), tag:'LOCAL_APPLY_FAILED', error: String(applyErr), job: path.basename(file), base });
-      try { if (Sentry) Sentry.captureException(applyErr); } catch {}
+      try { if (Sentry) Sentry.captureException(applyErr); } catch (e) {}
     }
 
     return sendJSON(res, 200, { ok:true, queued: path.basename(file), type: 'patch', sha256: job.sha256 });
@@ -446,7 +454,7 @@ async function applyDiffToRepo(diff, message, baseBranch = 'public') {
     try {
       await execp('git', ['diff', '--cached', '--quiet'], { cwd: repo });
       hasChanges = false; // exit 0 => no staged changes
-    } catch { hasChanges = true; }
+    } catch (e) { hasChanges = true; }
 
     if (hasChanges) {
       await execp('git', ['commit', '-m', message], { cwd: repo });
@@ -454,7 +462,7 @@ async function applyDiffToRepo(diff, message, baseBranch = 'public') {
     await execp('git', ['push', 'origin', baseBranch], { cwd: repo });
     logDbg({ time: nowISO(), tag:'GIT_PUSH_SUCCESS', message, baseBranch });
   } finally {
-    try { await fsp.unlink(patchPath); } catch {}
+    try { await fsp.unlink(patchPath); } catch (e) {}
   }
 }
 
@@ -467,7 +475,7 @@ async function handleDiffDryrun(req, res) {
 
     let body = {};
     try { body = JSON.parse(buf.toString('utf8') || '{}'); }
-    catch { return sendJSON(res, 400, { ok:false, error:'invalid_json' }); }
+    catch (e) { return sendJSON(res, 400, { ok:false, error:'invalid_json' }); }
 
     const base_branch = body.base_branch ? String(body.base_branch) : 'public';
     const diff = body.diff ? String(body.diff) : '';
@@ -495,10 +503,10 @@ async function handleDiffDryrun(req, res) {
       } catch (e) {
         return sendJSON(res, 422, { ok:false, error:'git apply --check failed', detail: e.stderr || e.stdout || String(e) });
       } finally {
-        try { await execp('git', ['worktree', 'remove', '--force', tmpDir], { cwd: repo }); } catch {}
+        try { await execp('git', ['worktree', 'remove', '--force', tmpDir], { cwd: repo }); } catch (e) {}
       }
     } catch (e) {
-      try { await execp('git', ['worktree', 'remove', '--force', tmpDir], { cwd: repo }); } catch {}
+      try { await execp('git', ['worktree', 'remove', '--force', tmpDir], { cwd: repo }); } catch (er) {}
       return sendJSON(res, 500, { ok:false, error: e.message || String(e) });
     }
   });
@@ -524,7 +532,7 @@ function handleRepoList(req, res) {
 
   let root;
   try { root = safeJoin(REPO_ROOT, rel); }
-  catch { return sendJSON(res, 400, { ok:false, error:'bad path' }); }
+  catch (e) { return sendJSON(res, 400, { ok:false, error:'bad path' }); }
 
   if (!fs.existsSync(root)) return sendJSON(res, 200, { ok:true, path: rel, items: [] });
 
@@ -543,7 +551,7 @@ function handleRepoList(req, res) {
           mtime: Math.floor(st.mtimeMs / 1000)
         });
         if (e.isDirectory() && d > 0) out.push(...walk(abs, d - 1, relp));
-      } catch {}
+      } catch (er) {}
     }
     return out;
   }
@@ -560,7 +568,7 @@ function handleRepoGet(req, res) {
 
   let abs;
   try { abs = safeJoin(REPO_ROOT, rel); }
-  catch { return sendJSON(res, 400, { ok:false, error:'bad path' }); }
+  catch (e) { return sendJSON(res, 400, { ok:false, error:'bad path' }); }
 
   if (!fs.existsSync(abs)) return sendJSON(res, 404, { ok:false, error:'not found' });
 
@@ -599,7 +607,7 @@ function handleJobsList(req, res) {
       .map(f => ({ file: f, mtime: Math.floor(fs.statSync(path.join(dir, f)).mtimeMs / 1000) }))
       .sort((a,b) => b.mtime - a.mtime)
       .slice(0, limit);
-  } catch { items = []; }
+  } catch (e) { items = []; }
   return sendJSON(res, 200, { ok:true, state, count: items.length, items });
 }
 
@@ -624,7 +632,7 @@ function handleJobsLog(req, res) {
           logPath = abs;
         }
       }
-    } catch { /* fallback to LOG_DIR/fname */ }
+    } catch (e) { /* fallback to LOG_DIR/fname */ }
 
     try {
       if (!fs.existsSync(logPath) || !fs.statSync(logPath).isFile()) return sendJSON(res, 404, { ok:false, error:'not_found' });
@@ -633,7 +641,7 @@ function handleJobsLog(req, res) {
       const tail = arr.slice(-lines).join('\n');
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=UTF-8' });
       return res.end(tail);
-    } catch {
+    } catch (e) {
       return sendJSON(res, 500, { ok:false, error:'read_error' });
     }
   }
@@ -647,16 +655,16 @@ function handleJobsLog(req, res) {
     ];
     let found = null;
     for (const pth of candidates) {
-      try { if (fs.existsSync(pth) && fs.statSync(pth).isFile()) { found = pth; break; } } catch {}
+      try { if (fs.existsSync(pth) && fs.statSync(pth).isFile()) { found = pth; break; } } catch (e) {}
     }
     if (!found) return sendJSON(res, 404, { ok:false, error:'not_found' });
     try {
       const text = fs.readFileSync(found, 'utf8');
       let obj;
       try { obj = JSON.parse(text); }
-      catch { return sendJSON(res, 422, { ok:false, error:'invalid_json_in_job' }); }
+      catch (e) { return sendJSON(res, 422, { ok:false, error:'invalid_json_in_job' }); }
       return sendJSON(res, 200, obj);
-    } catch {
+    } catch (e) {
       return sendJSON(res, 500, { ok:false, error:'read_error' });
     }
   }
@@ -699,11 +707,11 @@ function handler(req, res) {
           scope.setExtras({ ip: ipOf(req), ua: String(req.headers['user-agent'] || '') });
           Sentry.captureMessage(String(parsed.query.log), 'info');
         });
-      } catch {}
+      } catch (e) {}
     }
     // /ai2/debug?boom=1 → simulate an exception (error event)
     if (parsed.query && parsed.query.boom && Sentry) {
-      try { throw new Error('Manual Sentry test error (boom=1)'); } catch (e) { Sentry.captureException(e); }
+      try { throw new Error('Manual Sentry test error (boom=1)'); } catch (e) { try { Sentry.captureException(e); } catch (er) {} }
     }
 
     const dsnMasked = (process.env.SENTRY_DSN || '').replace(/https?:\/\/([^@]+)@/, 'https://***@');
@@ -726,10 +734,10 @@ function handler(req, res) {
   // version (reads VERSION.txt; falls back to git rev)
   if (isRoute(req, pathname, ['GET','HEAD'], '/version')) {
     let rev = '';
-    try { rev = fs.readFileSync(VERSION_FILE, 'utf8').trim(); } catch {}
+    try { rev = fs.readFileSync(VERSION_FILE, 'utf8').trim(); } catch (e) {}
     if (!rev) {
       try { rev = execFileSync('git', ['rev-parse','--short','HEAD'], { cwd: REPO_ROOT, encoding: 'utf8' }).trim(); }
-      catch { rev = 'unknown'; }
+      catch (e) { rev = 'unknown'; }
     }
     return sendJSON(res, 200, { ok:true, version: rev || 'unknown' });
   }
