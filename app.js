@@ -40,6 +40,37 @@ const url    = require('url');
 const os     = require('os');
 const { execFile, execFileSync } = require('child_process');
 
+/* ---------------- Sentry (optional; env-driven) ---------------- */
+let Sentry = null;
+try {
+  // Only loads if installed; safe to skip otherwise
+  Sentry = require('@sentry/node');
+
+  const integrations = [];
+  if (Sentry.consoleLoggingIntegration) {
+    integrations.push(Sentry.consoleLoggingIntegration({ levels: ['log', 'warn', 'error'] }));
+  } else if (Sentry.consoleIntegration) {
+    integrations.push(Sentry.consoleIntegration({ levels: ['log', 'warn', 'error'] }));
+  }
+
+  Sentry.init({
+    dsn: process.env.SENTRY_DSN || undefined,      // set via systemd env or skip
+    environment: process.env.SENTRY_ENV || 'production',
+    integrations,
+    tracesSampleRate: 0.0
+  });
+
+  process.on('uncaughtException', (e) => { try { Sentry.captureException(e); } catch {} });
+  process.on('unhandledRejection', (r) => {
+    try { Sentry.captureException(r instanceof Error ? r : new Error(String(r))); } catch {}
+  });
+
+  console.info('[ai2] Sentry initialized');
+} catch (e) {
+  console.warn('[ai2] Sentry not loaded (optional):', e && e.message ? e.message : e);
+}
+/* ---------------- end Sentry ---------------- */
+
 // ----- config -----
 const BASE_URI     = '/ai2';
 
@@ -284,6 +315,20 @@ function handleJobSubmit(req, res) {
     }
 
     logDbg({ time: nowISO(), tag:'ENQUEUED', job: path.basename(file), type, idem: idemVal || null });
+
+    // Sentry breadcrumb
+    try {
+      if (Sentry) {
+        Sentry.withScope(scope => {
+          scope.setTag('job', path.basename(file));
+          scope.setTag('type', 'commands');
+          scope.setTag('endpoint', 'job_submit');
+          scope.setExtras({ ip: ipOf(req), ua: String(req.headers['user-agent'] || ''), idem: idemVal || null });
+          Sentry.captureMessage(`AI2 job enqueued: ${path.basename(file)}`, 'info');
+        });
+      }
+    } catch {}
+
     return sendJSON(res, 200, { ok:true, queued: path.basename(file), type });
   });
 }
@@ -340,8 +385,8 @@ async function handleDiffSubmit(req, res) {
       from_endpoint: 'diff_submit_action_node',
       ip: ipOf(req),
       ua: String(req.headers['user-agent'] || ''),
-      type: 'patch',            // <-- add
-      schema: 1,                // <-- add
+      type: 'patch',
+      schema: 1,
       base_branch: base,
       message: (rawMessage || `ChatGPT change ${nowISO()}`),
       diff,
@@ -356,12 +401,30 @@ async function handleDiffSubmit(req, res) {
       return sendJSON(res, 500, { ok:false, error:'queue_write_failed' });
     }
 
+    // Sentry breadcrumb
+    try {
+      if (Sentry) {
+        Sentry.withScope(scope => {
+          scope.setTag('job', path.basename(file));
+          scope.setTag('type', 'patch');
+          scope.setTag('endpoint', 'diff_submit');
+          scope.setTag('base_branch', base);
+          scope.setExtras({
+            ip: ipOf(req), ua: String(req.headers['user-agent'] || ''),
+            idem: idemVal || null, sha256: job.sha256
+          });
+          Sentry.captureMessage(`AI2 patch enqueued: ${path.basename(file)}`, 'info');
+        });
+      }
+    } catch {}
+
     // Best-effort local apply to REPO_ROOT on the same branch (does not affect queue)
     try {
       await applyDiffToRepo(diff, rawMessage || `ChatGPT change ${nowISO()}`, base);
       logDbg({ time: nowISO(), tag:'APPLIED_LOCALLY', job: path.basename(file), base });
     } catch (applyErr) {
       logDbg({ time: nowISO(), tag:'LOCAL_APPLY_FAILED', error: String(applyErr), job: path.basename(file), base });
+      try { if (Sentry) Sentry.captureException(applyErr); } catch {}
     }
 
     return sendJSON(res, 200, { ok:true, queued: path.basename(file), type: 'patch', sha256: job.sha256 });
@@ -558,7 +621,7 @@ function handleJobsLog(req, res) {
       if (raw.includes('/')) {
         const abs = fs.realpathSync(path.join('/home/genweb/agent', raw));
         const allowedRoots = [LOG_DIR, DONE_DIR, FAIL_DIR].map(r => fs.realpathSync(r));
-        if (allowedRoots.some(r => abs.startsWith(r + path.sep))) {
+        if (allowedRoots.some(r => abs === r || abs.startsWith(r + path.sep))) {
           logPath = abs;
         }
       }
@@ -615,7 +678,8 @@ function isRoute(req, pathname, methods, p) {
 
 // ----- router -----
 function handler(req, res) {
-  const pathname = url.parse(req.url).pathname || '';
+  const parsed = url.parse(req.url, true);
+  const pathname = parsed.pathname || '';
 
   // static first
   if (serveStatic(req, res, pathname)) return;
@@ -627,15 +691,38 @@ function handler(req, res) {
     return sendJSON(res, 200, { ok:true, time: nowISO() });
 
   // debug (GET only)
-  if (isRoute(req, pathname, 'GET', '/debug'))
+  if (isRoute(req, pathname, 'GET', '/debug')) {
+    // /ai2/debug?log=Your+message → info log to Sentry
+    if (parsed.query && parsed.query.log && Sentry) {
+      try {
+        Sentry.withScope(scope => {
+          scope.setTag('endpoint','debug');
+          scope.setExtras({ ip: ipOf(req), ua: String(req.headers['user-agent'] || '') });
+          Sentry.captureMessage(String(parsed.query.log), 'info');
+        });
+      } catch {}
+    }
+    // /ai2/debug?boom=1 → simulate an exception (error event)
+    if (parsed.query && parsed.query.boom && Sentry) {
+      try { throw new Error('Manual Sentry test error (boom=1)'); } catch (e) { Sentry.captureException(e); }
+    }
+
+    const dsnMasked = (process.env.SENTRY_DSN || '').replace(/https?:\/\/([^@]+)@/, 'https://***@');
     return sendJSON(res, 200, {
       ok: true,
       underPassenger: !!process.env.PASSENGER_APP_ENV,
       node: process.version,
       port: process.env.PORT || process.env.PASSENGER_PORT || null,
       cwd: process.cwd(),
-      time: nowISO()
+      time: nowISO(),
+      sentry: {
+        enabled: Boolean(process.env.SENTRY_DSN),
+        env: process.env.SENTRY_ENV || null,
+        dsn_present: Boolean(process.env.SENTRY_DSN),
+        dsn_masked: dsnMasked || null
+      }
     });
+  }
 
   // version (reads VERSION.txt; falls back to git rev)
   if (isRoute(req, pathname, ['GET','HEAD'], '/version')) {
