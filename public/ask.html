@@ -1,38 +1,28 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>AI2 Ask</title>
-<style>body{font:16px/1.5 system-ui;margin:2rem;max-width:900px}</style>
-<h1>AI2 Ask</h1>
+<title>AI2 Planner</title>
+<style>
+body{font:16px/1.5 system-ui;margin:2rem;max-width:900px}
+textarea{width:100%;height:8em}
+pre{background:#f7f7f7;border:1px solid #ccc;padding:1em;white-space:pre-wrap}
+</style>
+<h1>AI2 Planner</h1>
 <form id="f">
-  <label>Prompt to ChatGPT</label><br>
-  <textarea id="prompt" rows="8" style="width:100%" placeholder="e.g. Create public/hello-ai2.html that says Hello from AI2 and links back to /ai2/static/"></textarea>
-  <p>
-    <label><input type="radio" name="mode" value="patch" checked> Patch (preferred)</label>
-    &nbsp;&nbsp;
-    <label><input type="radio" name="mode" value="commands"> Commands job</label>
-  </p>
-  <button>Send</button>
+  <label>Prompt:</label><br>
+  <textarea id="prompt" placeholder="e.g. Create a webapp for inventory management (Node backend, React frontend)"></textarea><br>
+  <button>Submit</button>
 </form>
-
-<pre id="out" style="white-space:pre-wrap;background:#f6f6f6;padding:1rem;border:1px solid #ddd"></pre>
-
+<pre id="out"></pre>
 <script>
-document.getElementById('f').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const prompt = document.getElementById('prompt').value.trim();
-  const mode = new FormData(e.target).get('mode') || 'patch';
-  const out = document.getElementById('out');
-  out.textContent = 'Sending…';
-  try {
-    const r = await fetch('/ai2/ask', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ prompt, mode })
-    });
-    const j = await r.json();
-    out.textContent = JSON.stringify(j, null, 2);
-  } catch(err){
-    out.textContent = 'Error: ' + err;
-  }
+document.getElementById('f').addEventListener('submit',async(e)=>{
+ e.preventDefault();
+ const p=document.getElementById('prompt').value.trim();
+ const out=document.getElementById('out');
+ out.textContent='Sending...';
+ try{
+  const r=await fetch('/ai2/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:p})});
+  const j=await r.json();
+  out.textContent=JSON.stringify(j,null,2);
+ }catch(err){out.textContent='Error: '+err;}
 });
 </script>
