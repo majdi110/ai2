@@ -431,14 +431,14 @@ async function callOpenAIPlan(userPrompt) {
   if (!OPENAI_API_KEY) throw new Error('missing_openai_key');
 
   const system = buildPlannerSystemPrompt();
-  // OpenAI Responses API
+  // OpenAI Responses API — JSON output via text.format
   const body = {
     model: OPENAI_MODEL,
     input: [
       { role: 'system', content: system },
       { role: 'user',   content: String(userPrompt) }
     ],
-    response_format: { type: 'json_object' }
+    text: { format: { type: "json_object" } }
   };
 
   const j = await httpsJson({
@@ -687,7 +687,7 @@ async function handlePlan(req, res) {
           // dry-run first
           const check = await gitDryRun(diff, base);
           if (!check.ok) {
-            results.push({ i, type:'patch', ok:false, error:'dryrun_failed', detail: check.error?.slice(0,400) || '' });
+            results.push({ i, type:'patch', ok:false, error:'dryrun_failed', detail: (check.error || '').slice(0,400) });
             if (!continueOnError) break;
             else continue;
           }
