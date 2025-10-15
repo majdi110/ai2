@@ -1,3 +1,18 @@
+
+          // Normalize model output to avoid "corrupt patch"
+
+          diff = diff.replace(/^FEFF/, "").replace(/
+/g, "
+").replace(/00A0/g, " ");
+
+          diff = diff.replace(/^s*
++/, "").replace(/
++s*, "");
+
+          try { logDbg({ time: nowISO(), tag: "PLAN_DIFF_HEAD", head: diff.split("
+").slice(0,8).join("
+") }); } catch (e) {}
+
 'use strict';
 
 /**
