@@ -181,9 +181,8 @@ function serveStatic(req, res, pathname) {
   const safeRel = rel0.split('/').filter(seg => seg && seg !== '.' && seg !== '..').join('/');
   const file = path.join(STATIC_ROOT, safeRel);
 
-  try {
-    const real = fs.realpathSync(file);
-    if (!real.startsWith(STATIC_ROOT)) { sendText(res, 403, 'Forbidden\n'); return true; }
+  
+if (!real.startsWith(STATIC_ROOT)) { sendText(res, 403, 'Forbidden\n'); return true; }
     if (!fs.existsSync(real) || !fs.statSync(real).isFile()) { sendText(res, 404, 'Not Found\n'); return true; }
 
     const ext = path.extname(real).toLowerCase();
