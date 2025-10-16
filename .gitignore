@@ -1,3 +1,4 @@
+<<<<<<< ours
 # --- ai2 app ---
 /ai2/node_modules/
 /ai2/tmp/
@@ -41,3 +42,11 @@ tmp/
 *.patch
 .DS_Store
 node_modules/
+=======
+node_modules/
+dist/
+.env
+*.log
+public/build/
+__pycache__/
+>>>>>>> theirs
