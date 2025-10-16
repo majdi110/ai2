@@ -48,24 +48,62 @@ const ALLOWED_BRANCHES = new Set([CANONICAL_BRANCH]);
 
 // Size caps (tight for plan & diffs; large global cap remains for generic endpoints)
 const MAX_DIFF_BYTES       = 200 * 1024;     // 200KB per diff
-const MAX_PLAN_BODY_BYTES  = 256 * 1024;     // /plan payload cap
+const MAX_PLAN_BODY_BYTES  = 256 * 1024;     // /plan & dryrun payload cap
 const MAX_PROMPT_CHARS     = 16 * 1024;      // 16K prompt text cap
 
 // Dry-run public endpoint throttling + optional low-trust key
 const DRYRUN_RL_PER_MIN    = 10;             // 10 requests/min/IP
 const DRYRUN_KEY           = process.env.DRYRUN_KEY || '';
 
-// Simple per-IP token bucket
-const rlBuckets = new Map(); // ip -> {tokens, ts}
-function allowDryrun(ip) {
-  const now = Date.now(), per = 60_000, max = DRYRUN_RL_PER_MIN;
-  let b = rlBuckets.get(ip);
-  if (!b) b = { tokens: max, ts: now };
-  const elapsed = now - b.ts;
-  const refill = Math.floor(elapsed / (per / max));
-  if (refill > 0) { b.tokens = Math.min(max, b.tokens + refill); b.ts = now; }
-  if (b.tokens <= 0) { rlBuckets.set(ip, b); return false; }
-  b.tokens -= 1; rlBuckets.set(ip, b); return true;
+// ---- GLOBAL (multi-process) rate limiter: file-based buckets ----
+const RL_DIR = '/home/genweb/agent/rl';
+try { fs.mkdirSync(RL_DIR, { recursive: true, mode: 0o700 }); } catch {}
+
+function withFileLock(lockPath, fn) {
+  // simple atomic lock via mkdir; short spin-wait
+  const start = Date.now();
+  while (true) {
+    try { fs.mkdirSync(lockPath, 0o700); break; }
+    catch (e) {
+      if (e && e.code !== 'EEXIST') throw e;
+      if (Date.now() - start > 200) throw new Error('rl_lock_timeout');
+    }
+  }
+  try { return fn(); }
+  finally { try { fs.rmdirSync(lockPath); } catch {} }
+}
+
+function allowDryrun(ipRaw) {
+  const ip = String(ipRaw || 'unknown').split(',')[0].trim() || 'unknown';
+  const key = ip.replace(/[^A-Za-z0-9:._-]/g, '_') || 'unknown';
+  const statePath = path.join(RL_DIR, key + '.json');
+  const lockPath  = path.join(RL_DIR, '.lock-' + key);
+
+  try {
+    return withFileLock(lockPath, () => {
+      let st = { tokens: DRYRUN_RL_PER_MIN, ts: Date.now() };
+      try { st = JSON.parse(fs.readFileSync(statePath, 'utf8')); } catch {}
+      const now = Date.now();
+      const per = 60_000;
+      const max = DRYRUN_RL_PER_MIN;
+
+      const elapsed = now - (st.ts || 0);
+      const refill = Math.floor(elapsed / (per / max)); // token every 6s if max=10
+      if (refill > 0) {
+        st.tokens = Math.min(max, (st.tokens || 0) + refill);
+        st.ts = now;
+      }
+
+      if ((st.tokens || 0) <= 0) { fs.writeFileSync(statePath, JSON.stringify(st), 'utf8'); return false; }
+      st.tokens = (st.tokens || 0) - 1;
+      st.ts = now;
+      fs.writeFileSync(statePath, JSON.stringify(st), 'utf8');
+      return true;
+    });
+  } catch {
+    // fail-open to avoid accidental outage; flip to "return false" if you prefer fail-closed
+    return true;
+  }
 }
 
 // Idempotency store (file-based, body-hash keyed)
@@ -511,7 +549,7 @@ async function callOpenAIPlan(userPrompt) {
 
   const txt =
     j.output_text ||
-    (j.output && j.output[0] && j.output[0].content && j.output[0].content[0] && j.output[0].content[0].text) ||
+    (j.output && j.output[0] && j.output[0].content && j.output[0].content[0] && j.output[0].text) ||
     (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) ||
     '';
 
@@ -694,7 +732,7 @@ async function handleDiffDryrun(req, res) {
     const k = req.headers['x-dryrun-key'];
     if (k !== DRYRUN_KEY) return sendJSON(res, 401, { ok:false, error:'unauthorized_dryrun_key' });
   }
-  // Rate limit per IP
+  // Global rate limit per IP (works across Passenger workers)
   const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString().split(',')[0].trim();
   if (!allowDryrun(ip)) return sendJSON(res, 429, { ok:false, error:'rate_limit_exceeded' });
 
