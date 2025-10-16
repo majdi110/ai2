@@ -11,11 +11,11 @@
  *   GET/HEAD  /ai2/static/<file>    -> serve ./public/<file> (safe types)
  *   GET       /ai2/debug            -> debug info (node version, env)
  *   POST      /ai2/echo             -> debug echo; shows headers/body + decoded preview
- *   POST      /ai2/plan             -> NEW: OpenAI-backed planner (returns/queues patch & command jobs)
+ *   POST      /ai2/plan             -> OpenAI-backed planner (returns/queues patch & command jobs)
  *
  * Actions (write; require token):
  *   POST /ai2/job_submit            -> enqueue a commands job (picked by worker)
- *   POST /ai2/diff_submit           -> enqueue a unified diff (as type=patch, schema=1)
+ *   POST /ai2/diff_submit           -> enqueue a unified diff (as type=patch, schema=1)  [Phase1: requires X-Idempotency-Key]
  *
  * Repo browsing (read-only; require token):
  *   GET /ai2/repo/list?path=&depth=
@@ -41,6 +41,66 @@ const crypto = require('crypto');
 const url    = require('url');
 const os     = require('os');
 const { execFile, execFileSync } = require('child_process');
+
+/* ---------------- Phase 1: constants & helpers ---------------- */
+const CANONICAL_BRANCH = 'public';
+const ALLOWED_BRANCHES = new Set([CANONICAL_BRANCH]);
+
+// Size caps (tight for plan & diffs; large global cap remains for generic endpoints)
+const MAX_DIFF_BYTES       = 200 * 1024;     // 200KB per diff
+const MAX_PLAN_BODY_BYTES  = 256 * 1024;     // /plan payload cap
+const MAX_PROMPT_CHARS     = 16 * 1024;      // 16K prompt text cap
+
+// Dry-run public endpoint throttling + optional low-trust key
+const DRYRUN_RL_PER_MIN    = 10;             // 10 requests/min/IP
+const DRYRUN_KEY           = process.env.DRYRUN_KEY || '';
+
+// Simple per-IP token bucket
+const rlBuckets = new Map(); // ip -> {tokens, ts}
+function allowDryrun(ip) {
+  const now = Date.now(), per = 60_000, max = DRYRUN_RL_PER_MIN;
+  let b = rlBuckets.get(ip);
+  if (!b) b = { tokens: max, ts: now };
+  const elapsed = now - b.ts;
+  const refill = Math.floor(elapsed / (per / max));
+  if (refill > 0) { b.tokens = Math.min(max, b.tokens + refill); b.ts = now; }
+  if (b.tokens <= 0) { rlBuckets.set(ip, b); return false; }
+  b.tokens -= 1; rlBuckets.set(ip, b); return true;
+}
+
+// Idempotency store (file-based, body-hash keyed)
+const IDEMP_STORE_DIR = '/home/genweb/agent/idempotency';
+try { fs.mkdirSync(IDEMP_STORE_DIR, { recursive: true }); } catch {}
+function sha256(s){ return crypto.createHash('sha256').update(s, 'utf8').digest('hex'); }
+function readJsonSafe(p){ try { return JSON.parse(fs.readFileSync(p,'utf8')); } catch { return null; } }
+function writeJsonSafe(p,obj){ fs.writeFileSync(p, JSON.stringify(obj), 'utf8'); }
+function checkIdempotencyOr409(key, bodyStr){
+  if(!key) return { ok:false, code:400, msg:'Missing X-Idempotency-Key' };
+  const file = path.join(IDEMP_STORE_DIR, key + '.json');
+  const hash = sha256(bodyStr);
+  const existing = readJsonSafe(file);
+  if(existing && existing.hash && existing.hash !== hash){
+    return { ok:false, code:409, msg:'Idempotency conflict: body differs for same key' };
+  }
+  writeJsonSafe(file, { key, hash, ts: Date.now() });
+  return { ok:true };
+}
+
+function enforceCanonicalBranch(branch) {
+  const b = (branch || '').trim() || CANONICAL_BRANCH;
+  if(!ALLOWED_BRANCHES.has(b)) {
+    return { ok:false, code:400, msg:`Unsupported base_branch '${b}'. Allowed: ${[...ALLOWED_BRANCHES].join(', ')}` };
+  }
+  return { ok:true, branch: b };
+}
+function enforceDiffSize(diffStr){
+  const n = Buffer.byteLength(diffStr || '', 'utf8');
+  if(n > MAX_DIFF_BYTES){
+    return { ok:false, code:413, msg:`Diff too large (${n} bytes). Max ${MAX_DIFF_BYTES}` };
+  }
+  return { ok:true };
+}
+/* ---------------- end Phase 1 ---------------- */
 
 /* ---------------- Sentry (optional; env-driven) ---------------- */
 let Sentry = null;
@@ -81,12 +141,12 @@ const QUEUE_DIR    = '/home/genweb/agent/queue';
 const DONE_DIR     = '/home/genweb/agent/done';
 const FAIL_DIR     = '/home/genweb/agent/failures';
 const LOG_DIR      = '/home/genweb/agent/logs';
-const IDEM_DIR     = QUEUE_DIR; // idempotency markers alongside jobs
+const IDEM_DIR     = QUEUE_DIR; // legacy idempotency markers alongside jobs (kept for queue dedupe)
 const DEBUG_LOG    = '/home/genweb/agent/last_action_debug.log';
 
 const STATIC_ROOT  = path.join(__dirname, 'public');
 const VERSION_FILE = path.join(__dirname, 'VERSION.txt');
-const MAX_BYTES    = 512 * 1024;
+const MAX_BYTES    = 512 * 1024; // generic read cap
 
 // Active repo path (this app's own repo)
 const REPO_ROOT      = '/home/genweb/public_html/datav.belocloud.com/ai2';
@@ -199,12 +259,12 @@ function httpsJson({ hostname, path, method='POST', headers={}, bodyObj }) {
   });
 }
 
-// read entire request body (size-guarded)
-function readBody(req, cb) {
+// read entire request body with a specific max cap
+function readBodyLimited(req, maxBytes, cb) {
   let n = 0; const chunks = [];
   req.on('data', c => {
     n += c.length;
-    if (n > MAX_BYTES) {
+    if (n > maxBytes) {
       const e = Object.assign(new Error('payload_too_large'), { code: 413 });
       cb(e); try { req.destroy(); } catch (er) {}
       return;
@@ -214,6 +274,8 @@ function readBody(req, cb) {
   req.on('end', () => cb(null, Buffer.concat(chunks)));
   req.on('error', cb);
 }
+// generic (kept for non-critical endpoints)
+function readBody(req, cb) { return readBodyLimited(req, MAX_BYTES, cb); }
 
 // static: /ai2/static/* (or /static/*) -> ./public/*
 function serveStatic(req, res, pathname) {
@@ -225,7 +287,6 @@ function serveStatic(req, res, pathname) {
   const file = path.join(STATIC_ROOT, safeRel);
 
   try {
-    // SAFE: 404 for missing files before realpathSync (avoid throw -> 500)
     if (!fs.existsSync(file)) { sendText(res, 404, 'Not Found\n'); return true; }
 
     const real = fs.realpathSync(file);
@@ -311,7 +372,7 @@ function enqueueCommandsJob({ schema, steps, workdir, idemVal, reqInfo }) {
   return { ok:true, queued: path.basename(file), type: 'commands' };
 }
 
-async function applyDiffToRepo(diff, message, baseBranch = 'public') {
+async function applyDiffToRepo(diff, message, baseBranch = CANONICAL_BRANCH) {
   const repo = REPO_ROOT;
   const patchPath = path.join(os.tmpdir(), `patch-${Date.now()}-${r4()}.patch`);
   try {
@@ -337,7 +398,7 @@ async function applyDiffToRepo(diff, message, baseBranch = 'public') {
   }
 }
 
-async function gitDryRun(diff, baseBranch='public') {
+async function gitDryRun(diff, baseBranch=CANONICAL_BRANCH) {
   const repo = __dirname;
   const tmpDir = path.join(os.tmpdir(), `ai2-dryrun-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   await fsp.mkdir(tmpDir, { recursive:true });
@@ -361,8 +422,8 @@ async function enqueuePatchJob({ base, message, diff, idemVal, reqInfo }) {
   const v = validateUnifiedDiff(diff);
   if (!v.ok) throw new Error(v.error);
 
-  const ALLOWED_BRANCHES = new Set(['main', 'master', 'public']);
-  if (!ALLOWED_BRANCHES.has(base)) throw new Error('branch_not_allowed');
+  // Branch already enforced by caller in Phase 1
+  const baseBranch = base || CANONICAL_BRANCH;
 
   // create queue file
   const id   = `job-${ts()}-${r4()}.json`;
@@ -374,7 +435,7 @@ async function enqueuePatchJob({ base, message, diff, idemVal, reqInfo }) {
     ua: reqInfo?.ua || '',
     type: 'patch',
     schema: 1,
-    base_branch: base,
+    base_branch: baseBranch,
     message: (message || `ChatGPT change ${nowISO()}`),
     diff,
     sha256: sha256S(diff)
@@ -394,9 +455,9 @@ async function enqueuePatchJob({ base, message, diff, idemVal, reqInfo }) {
 
   // best-effort local apply
   try {
-    await applyDiffToRepo(diff, job.message, base);
+    await applyDiffToRepo(diff, job.message, baseBranch);
   } catch (e) {
-    logDbg({ time: nowISO(), tag:'LOCAL_APPLY_FAILED', error: String(e), job: path.basename(file), base });
+    logDbg({ time: nowISO(), tag:'LOCAL_APPLY_FAILED', error: String(e), job: path.basename(file), base: baseBranch });
     try { if (Sentry) Sentry.captureException(e); } catch (er) {}
   }
 
@@ -448,7 +509,6 @@ async function callOpenAIPlan(userPrompt) {
     bodyObj: body
   });
 
-  // Try multiple fields for text output (compat with variants)
   const txt =
     j.output_text ||
     (j.output && j.output[0] && j.output[0].content && j.output[0].content[0] && j.output[0].content[0].text) ||
@@ -471,7 +531,7 @@ function validatePlan(plan){
     if (!isObj(p) || typeof p.type !== 'string') return `plan_item_${i}_missing_type`;
     if (p.type === 'patch') {
       if (typeof p.diff !== 'string' || !p.diff.startsWith('diff --git')) return `plan_item_${i}_bad_diff`;
-      if (p.diff.length > 200*1024) return `plan_item_${i}_diff_too_large`;
+      if (p.diff.length > MAX_DIFF_BYTES) return `plan_item_${i}_diff_too_large`;
     } else if (p.type === 'commands') {
       if ((p.schema|0) !== 1 || !Array.isArray(p.steps) || p.steps.length === 0) return `plan_item_${i}_bad_commands`;
     } else {
@@ -541,7 +601,6 @@ function handleJobSubmit(req, res) {
         reqInfo: { from:'job_submit_action_node', ip: ipOf(req), ua: String(req.headers['user-agent'] || '') }
       });
 
-      // Sentry breadcrumb
       try {
         if (Sentry && out.ok && out.queued) {
           Sentry.withScope(scope => {
@@ -570,29 +629,34 @@ async function handleDiffSubmit(req, res) {
   const ct = (req.headers['content-type'] || '').toLowerCase();
   if (!ct.includes('application/json')) return sendJSON(res, 415, { ok:false, error:'unsupported_media_type' });
 
-  readBody(req, async (err, buf) => {
+  readBodyLimited(req, MAX_PLAN_BODY_BYTES, async (err, buf) => {
     if (err) return sendJSON(res, err.code === 413 ? 413 : 400, { ok:false, error: err.message || 'read_error' });
 
-    const hdr = { ...req.headers };
-    if (hdr.authorization) hdr.authorization = '[redacted]';
-    if (hdr['x-api-key'])  hdr['x-api-key']  = '[redacted]';
-    logDbg({ time: nowISO(), tag:'REQ', path: req.url, method: req.method, ct, ip: ipOf(req), headers: hdr });
-    logDbg({ time: nowISO(), tag:'REQ_BODY', raw_len: buf.length, json_head: buf.slice(0, 512).toString('utf8') });
+    const bodyStr = buf.toString('utf8');
+    // Phase 1: require idempotency and lock branch
+    const idem = String(req.headers['x-idempotency-key'] || '');
+    const idemChk = checkIdempotencyOr409(idem, bodyStr);
+    if(!idemChk.ok){ return sendJSON(res, idemChk.code, { ok:false, error: idemChk.msg }); }
 
     let body = {};
-    try { body = JSON.parse(buf.toString('utf8') || '{}'); }
+    try { body = JSON.parse(bodyStr || '{}'); }
     catch (e) { return sendJSON(res, 400, { ok:false, error:'invalid_json' }); }
 
-    const base         = String(body.base_branch || 'public');
-    const rawMessage   = (typeof body.message === 'string' ? body.message.trim() : '');
+    const baseRaw      = String(body.base_branch || CANONICAL_BRANCH);
+    const br           = enforceCanonicalBranch(baseRaw);
+    if(!br.ok) return sendJSON(res, br.code, { ok:false, error: br.msg });
+
     const diff         = String(body.diff || '');
-    const idemHeader   = String(req.headers['x-idempotency-key'] || '');
+    const sizeChk      = enforceDiffSize(diff);
+    if(!sizeChk.ok) return sendJSON(res, sizeChk.code, { ok:false, error: sizeChk.msg });
+
+    const rawMessage   = (typeof body.message === 'string' ? body.message.trim() : '');
     const idemBody     = String(body.idempotency_key || '');
-    const idemVal      = idemHeader || idemBody || '';
+    const idemVal      = idem || idemBody || '';
 
     try {
       const out = await enqueuePatchJob({
-        base, message: rawMessage, diff, idemVal,
+        base: br.branch, message: rawMessage, diff, idemVal,
         reqInfo: { from:'diff_submit_action_node', ip: ipOf(req), ua: String(req.headers['user-agent'] || '') }
       });
 
@@ -602,7 +666,7 @@ async function handleDiffSubmit(req, res) {
             scope.setTag('job', out.queued);
             scope.setTag('type', 'patch');
             scope.setTag('endpoint', 'diff_submit');
-            scope.setTag('base_branch', base);
+            scope.setTag('base_branch', br.branch);
             scope.setExtras({ ip: ipOf(req), ua: String(req.headers['user-agent'] || ''), idem: idemVal || null, sha256: out.sha256 || null });
             Sentry.captureMessage(`AI2 patch enqueued: ${out.queued}`, 'info');
           });
@@ -613,7 +677,7 @@ async function handleDiffSubmit(req, res) {
     } catch (e) {
       const msg = String(e && e.message || e);
       const status =
-        msg === 'branch_not_allowed' || msg === 'diff_required' || msg === 'diff_contains_control_bytes' || msg.startsWith('diff_')
+        msg === 'diff_required' || msg === 'diff_contains_control_bytes' || msg.startsWith('diff_')
           ? 400
           : 500;
       return sendJSON(res, status, { ok:false, error: msg });
@@ -625,24 +689,36 @@ async function handleDiffDryrun(req, res) {
   const ct = (req.headers['content-type'] || '').toLowerCase();
   if (!ct.includes('application/json')) return sendJSON(res, 415, { ok:false, error:'unsupported_media_type' });
 
-  readBody(req, async (err, buf) => {
+  // Optional low-trust key
+  if (DRYRUN_KEY) {
+    const k = req.headers['x-dryrun-key'];
+    if (k !== DRYRUN_KEY) return sendJSON(res, 401, { ok:false, error:'unauthorized_dryrun_key' });
+  }
+  // Rate limit per IP
+  const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString().split(',')[0].trim();
+  if (!allowDryrun(ip)) return sendJSON(res, 429, { ok:false, error:'rate_limit_exceeded' });
+
+  readBodyLimited(req, MAX_PLAN_BODY_BYTES, async (err, buf) => {
     if (err) return sendJSON(res, err.code === 413 ? 413 : 400, { ok:false, error: err.message || 'read_error' });
 
     let body = {};
     try { body = JSON.parse(buf.toString('utf8') || '{}'); }
     catch (e) { return sendJSON(res, 400, { ok:false, error:'invalid_json' }); }
 
-    const base_branch = body.base_branch ? String(body.base_branch) : 'public';
+    const baseRaw = body.base_branch ? String(body.base_branch) : CANONICAL_BRANCH;
+    const br = enforceCanonicalBranch(baseRaw);
+    if(!br.ok) return sendJSON(res, br.code, { ok:false, error: br.msg });
+
     const diff = body.diff ? String(body.diff) : '';
     if (!diff) return sendJSON(res, 400, { ok:false, error:'missing diff' });
 
-    const patchBuf = Buffer.from(diff, 'utf8');
-    if (patchBuf.length > 5 * 1024 * 1024) return sendJSON(res, 413, { ok:false, error:'patch too large (>5MB)' });
+    const sizeChk = enforceDiffSize(diff);
+    if(!sizeChk.ok) return sendJSON(res, sizeChk.code, { ok:false, error: sizeChk.msg });
 
     const v = validateUnifiedDiff(diff);
     if (!v.ok) return sendJSON(res, 400, { ok:false, error: v.error });
 
-    const out = await gitDryRun(diff, base_branch);
+    const out = await gitDryRun(diff, br.branch);
     if (out.ok) return sendJSON(res, 200, { ok:true });
     return sendJSON(res, 422, { ok:false, error:'git apply --check failed', detail: out.error || '' });
   });
@@ -653,16 +729,28 @@ async function handlePlan(req, res) {
   const ct = (req.headers['content-type'] || '').toLowerCase();
   if (!ct.includes('application/json')) return sendJSON(res, 415, { ok:false, error:'unsupported_media_type' });
 
-  readBody(req, async (err, buf) => {
-    if (err) return sendJSON(res, 400, { ok:false, error: err.message || 'read_error' });
+  readBodyLimited(req, MAX_PLAN_BODY_BYTES, async (err, buf) => {
+    if (err) return sendJSON(res, err.code === 413 ? 413 : 400, { ok:false, error: err.message || 'read_error' });
+
+    const bodyStr = buf.toString('utf8');
+
+    // Phase 1: require idempotency
+    const idem = String(req.headers['x-idempotency-key'] || '');
+    const idemChk = checkIdempotencyOr409(idem, bodyStr);
+    if(!idemChk.ok){ return sendJSON(res, idemChk.code, { ok:false, error: idemChk.msg }); }
 
     let body = {};
-    try { body = JSON.parse(buf.toString('utf8') || '{}'); }
+    try { body = JSON.parse(bodyStr || '{}'); }
     catch (e) { return sendJSON(res, 400, { ok:false, error:'invalid_json' }); }
 
     const prompt = String(body.prompt || '').trim();
     if (!prompt) return sendJSON(res, 400, { ok:false, error:'prompt_required' });
+    if (prompt.length > MAX_PROMPT_CHARS) return sendJSON(res, 413, { ok:false, error:`prompt_too_long`, limit: MAX_PROMPT_CHARS });
     if (!OPENAI_API_KEY) return sendJSON(res, 500, { ok:false, error:'missing_openai_key' });
+
+    const baseRaw = String(body.base_branch || CANONICAL_BRANCH);
+    const br = enforceCanonicalBranch(baseRaw);
+    if(!br.ok) return sendJSON(res, br.code, { ok:false, error: br.msg });
 
     // call OpenAI
     let plan;
@@ -681,20 +769,23 @@ async function handlePlan(req, res) {
       const item = plan.plan[i];
       try {
         if (item.type === 'patch') {
-          const base   = String(item.base_branch || 'public');
           const diff   = String(item.diff || '');
-          const msg    = String(item.message || `Plan patch ${nowISO()}`);
-          // dry-run first
-          const check = await gitDryRun(diff, base);
+          const sizeChk = enforceDiffSize(diff);
+          if(!sizeChk.ok){ results.push({ i, type:'patch', ok:false, error:sizeChk.msg }); if(!continueOnError) break; else continue; }
+
+          // dry-run first on canonical branch
+          const check = await gitDryRun(diff, br.branch);
           if (!check.ok) {
             results.push({ i, type:'patch', ok:false, error:'dryrun_failed', detail: (check.error || '').slice(0,400) });
             if (!continueOnError) break;
             else continue;
           }
           const out = await enqueuePatchJob({
-            base, message: msg, diff,
-            idemVal: `plan-${sha256S(prompt)}-${i}`,
-            reqInfo: { from:'plan_endpoint', ip:'', ua:'' }
+            base: br.branch,
+            message: String(item.message || `Plan patch ${nowISO()}`),
+            diff,
+            idemVal: `plan-${sha256(prompt)}-${i}`,
+            reqInfo: { from:'plan_endpoint', ip: ipOf(req), ua: String(req.headers['user-agent'] || '') }
           });
           results.push({ i, type:'patch', ok:true, queued: out.queued, sha256: out.sha256 });
         } else if (item.type === 'commands') {
@@ -703,8 +794,8 @@ async function handlePlan(req, res) {
           const workdir = item.workdir ? String(item.workdir) : REPO_ROOT;
           const out = enqueueCommandsJob({
             schema, steps, workdir,
-            idemVal: `plan-${sha256S(prompt)}-${i}`,
-            reqInfo: { from:'plan_endpoint', ip:'', ua:'' }
+            idemVal: `plan-${sha256(prompt)}-${i}`,
+            reqInfo: { from:'plan_endpoint', ip: ipOf(req), ua: String(req.headers['user-agent'] || '') }
           });
           results.push({ i, type:'commands', ok:true, queued: out.queued });
         } else {
@@ -717,7 +808,6 @@ async function handlePlan(req, res) {
       }
     }
 
-    // simple breadcrumb
     try {
       if (Sentry) {
         Sentry.withScope(scope => {
@@ -968,11 +1058,11 @@ function handler(req, res) {
   if (isRoute(req, pathname, 'POST', '/diff_submit'))
     return handleDiffSubmit(req, res);
 
-  // dryrun (no auth)
+  // dryrun (no auth; Phase1: throttled + optional key)
   if (isRoute(req, pathname, 'POST', '/diff_dryrun'))
     return handleDiffDryrun(req, res);
 
-  // NEW planner
+  // planner
   if (isRoute(req, pathname, 'POST', '/plan'))
     return handlePlan(req, res);
 

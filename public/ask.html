@@ -1,28 +1,181 @@
 <!doctype html>
-<meta charset="utf-8">
-<title>AI2 Planner</title>
+<meta charset="utf-8" />
+<title>AI2 Plan Builder</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
 <style>
-body{font:16px/1.5 system-ui;margin:2rem;max-width:900px}
-textarea{width:100%;height:8em}
-pre{background:#f7f7f7;border:1px solid #ccc;padding:1em;white-space:pre-wrap}
+  :root { --bg:#0b0f14; --card:#111827; --ink:#e5e7eb; --muted:#9ca3af; --accent:#22d3ee; --ok:#22c55e; --err:#ef4444; }
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 system-ui,Segoe UI,Roboto,Helvetica,Arial}
+  .wrap{max-width:980px;margin:auto;padding:24px}
+  .card{background:var(--card);border:1px solid #1f2937;border-radius:16px;padding:18px;box-shadow:0 6px 24px rgba(0,0,0,.35)}
+  .row{display:flex;gap:16px;flex-wrap:wrap}
+  .col{flex:1 1 320px}
+  textarea,select,input[type="text"]{width:100%;padding:12px 14px;border-radius:12px;border:1px solid #334155;background:#0b1220;color:var(--ink)}
+  label{display:block;margin:8px 0 6px;color:var(--muted);font-size:14px}
+  .btn{appearance:none;border:0;border-radius:12px;padding:12px 16px;background:var(--accent);color:#061018;font-weight:700;cursor:pointer}
+  .btn.secondary{background:#334155;color:var(--ink)}
+  .btn:disabled{opacity:.6;cursor:not-allowed}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;font-size:12px}
+  .pill.ok{background:rgba(34,197,94,.15);color:var(--ok)}
+  .pill.err{background:rgba(239,68,68,.15);color:var(--err)}
+  details{background:#0b1220;border:1px solid #263043;border-radius:12px;padding:12px}
+  pre{overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0}
+  .muted{color:var(--muted)}
 </style>
-<h1>AI2 Planner</h1>
-<form id="f">
-  <label>Prompt:</label><br>
-  <textarea id="prompt" placeholder="e.g. Create a webapp for inventory management (Node backend, React frontend)"></textarea><br>
-  <button>Submit</button>
-</form>
-<pre id="out"></pre>
+
+<div class="wrap">
+  <h1 style="margin:0 0 8px">AI2 Plan Builder</h1>
+  <p class="muted" style="margin:0 0 18px">Type what you want to build. Choose <b>Preview only</b> to just inspect the plan, or <b>Apply now</b> to enqueue and execute.</p>
+
+  <div class="card" style="margin-bottom:16px">
+    <div class="row">
+      <div class="col">
+        <label for="prompt">Prompt</label>
+        <textarea id="prompt" rows="8" placeholder="Build a minimal one-page product grid app with 8 demo products..."></textarea>
+      </div>
+      <div class="col">
+        <div class="row">
+          <div class="col">
+            <label for="branch">Base branch</label>
+            <select id="branch">
+              <option value="public" selected>public</option>
+              <option value="main">main</option>
+              <option value="master">master</option>
+            </select>
+          </div>
+          <div class="col">
+            <label for="ops">Allowed operations</label>
+            <select id="ops" multiple size="3">
+              <option selected>create</option>
+              <option selected>modify</option>
+              <option>delete</option>
+            </select>
+          </div>
+        </div>
+
+        <label><input type="checkbox" id="previewOnly" checked> Preview only (don’t apply)</label>
+        <label><input type="checkbox" id="continueOnError" checked> Continue on error</label>
+        <label><input type="checkbox" id="returnArtifacts"> Return artifacts (if any)</label>
+        <label><input type="checkbox" id="returnCombined" checked> Return combined diff</label>
+        <label for="idem">Idempotency key (optional)</label>
+        <input id="idem" type="text" placeholder="auto-generated if empty" />
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:14px">
+      <div class="col">
+        <button class="btn" id="go">Generate Plan</button>
+        <button class="btn secondary" id="clear">Clear</button>
+        <span id="status" class="muted" style="margin-left:12px"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">Result</h3>
+    <div id="result" class="muted">No result yet.</div>
+  </div>
+</div>
+
 <script>
-document.getElementById('f').addEventListener('submit',async(e)=>{
- e.preventDefault();
- const p=document.getElementById('prompt').value.trim();
- const out=document.getElementById('out');
- out.textContent='Sending...';
- try{
-  const r=await fetch('/ai2/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:p})});
-  const j=await r.json();
-  out.textContent=JSON.stringify(j,null,2);
- }catch(err){out.textContent='Error: '+err;}
-});
+const $ = (s)=>document.querySelector(s);
+const $$ = (s)=>Array.from(document.querySelectorAll(s));
+
+function uiBusy(b){
+  $("#go").disabled=b; $("#clear").disabled=b;
+  $("#status").textContent = b ? "Working..." : "";
+}
+
+function pickOps(){ return $$("#ops option").filter(o=>o.selected).map(o=>o.value); }
+
+function renderPlan(json){
+  const el = $("#result");
+  if(!json){ el.textContent="No data"; return; }
+
+  // Accept either your current {ok, results,...} or the stricter {schema,steps,...}
+  const steps = json.steps || json.results || [];
+  const combined = json.combined_diff || (json.summary && json.summary.combined_diff);
+  const planId = json.id || (json.summary && json.summary.id) || "";
+
+  const items = steps.map((s,i)=>{
+    const status = s.ok===false || s.status==="error" ? `<span class="pill err">error</span>` : `<span class="pill ok">ok</span>`;
+    const title = s.description || s.type || s.kind || `step ${i+1}`;
+    const diff = s.diff || (s.patch && s.patch.diff) || "";
+    const logs = s.logs || s.message || "";
+    return `
+      <div style="margin:10px 0 16px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <strong>${title}</strong> ${status}
+        </div>
+        ${diff ? `<details style="margin-top:8px"><summary>Show diff</summary><pre>${escapeHtml(diff)}</pre></details>` : ""}
+        ${logs ? `<details style="margin-top:8px"><summary>Logs</summary><pre>${escapeHtml(logs)}</pre></details>` : ""}
+      </div>`;
+  }).join("");
+
+  const combo = combined ? `
+    <details open style="margin-top:8px">
+      <summary><b>Combined diff</b></summary>
+      <pre>${escapeHtml(combined)}</pre>
+    </details>` : "";
+
+  const downloadBtn = `<button class="btn secondary" onclick='downloadJSON(${JSON.stringify(JSON.stringify(json))})'>Download JSON</button>`;
+
+  el.innerHTML = `
+    ${planId ? `<div class="muted" style="margin-bottom:6px">Plan ID: ${planId}</div>` : ""}
+    ${items || "<div class='muted'>No steps received.</div>"}
+    ${combo}
+    <div style="margin-top:12px">${downloadBtn}</div>
+  `;
+}
+
+function escapeHtml(s){ return String(s).replace(/[&<>"]/g, m=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[m])); }
+
+function downloadJSON(jsonStr){
+  const blob = new Blob([jsonStr], {type:"application/json"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "plan.json";
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+$("#clear").onclick = ()=>{ $("#prompt").value=""; $("#result").textContent="Cleared."; };
+
+$("#go").onclick = async ()=>{
+  uiBusy(true);
+  try{
+    const body = {
+      schema: 1,
+      prompt: $("#prompt").value.trim(),
+      constraints: {
+        root_dir: "/home/genweb/public_html/datav.belocloud.com/ai2",
+        assets_dir: "public",
+        allowed_ops: pickOps(),
+        diff_format: "git-unified",
+        require_strict_json: true
+      },
+      outputs: {
+        return_plan: true,
+        return_combined_diff: $("#returnCombined").checked,
+        return_artifacts: $("#returnArtifacts").checked
+      },
+      preview_only: $("#previewOnly").checked,
+      continue_on_error: $("#continueOnError").checked,
+      base_branch: $("#branch").value
+    };
+
+    const headers = {"Content-Type":"application/json"};
+    const idem = $("#idem").value.trim();
+    if(idem) headers["X-Idempotency-Key"] = idem;
+
+    const res = await fetch("/ai2/plan", { method:"POST", headers, body: JSON.stringify(body) });
+    const json = await res.json().catch(()=>null);
+
+    $("#status").textContent = res.ok ? "Done" : `Error ${res.status}`;
+    renderPlan(json || {error:true, status:res.status});
+  }catch(err){
+    $("#status").textContent = "Network error";
+    $("#result").textContent = String(err);
+  }finally{
+    uiBusy(false);
+  }
+};
 </script>
