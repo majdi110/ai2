@@ -1,4 +1,5 @@
 <<<<<<< ours
+<<<<<<< ours
 # --- ai2 app ---
 /ai2/node_modules/
 /ai2/tmp/
@@ -49,4 +50,9 @@ dist/
 *.log
 public/build/
 __pycache__/
+>>>>>>> theirs
+=======
+node_modules/
+dist/
+.env
 >>>>>>> theirs
