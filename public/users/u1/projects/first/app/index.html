@@ -3,6 +3,7 @@
 <head>
 <<<<<<< ours
 <<<<<<< ours
+<<<<<<< ours
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <<<<<<< ours
@@ -58,11 +59,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Doctor Service Landing Page</title>
 >>>>>>> theirs
+=======
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Doctor Service App - Landing Page</title>
+>>>>>>> theirs
     <style>
         body {
             font-family: Arial, sans-serif;
             margin: 0;
             padding: 0;
+<<<<<<< ours
 <<<<<<< ours
             background: #f2f7fa;
 =======
@@ -190,10 +197,90 @@
             color: red;
             font-weight: bold;
 >>>>>>> theirs
+=======
+            background-color: #f7f9fc;
+            color: #333;
+        }
+        header {
+            background-color: #0066cc;
+            color: white;
+            padding: 1rem 2rem;
+            text-align: center;
+        }
+        main {
+            max-width: 960px;
+            margin: 2rem auto;
+            padding: 0 1rem;
+        }
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+        }
+        p.lead {
+            font-size: 1.25rem;
+            color: #555;
+            margin-bottom: 2rem;
+        }
+        .service {
+            background: white;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        form {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            max-width: 400px;
+            margin: 0 auto 2rem;
+        }
+        form label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: bold;
+        }
+        form input, form textarea, form select {
+            width: 100%;
+            padding: 0.5rem;
+            margin-bottom: 1rem;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 1rem;
+            box-sizing: border-box;
+        }
+        form button {
+            background-color: #0066cc;
+            color: white;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 4px;
+            font-size: 1rem;
+            cursor: pointer;
+        }
+        form button:hover {
+            background-color: #004999;
+        }
+        footer {
+            text-align: center;
+            padding: 1rem;
+            font-size: 0.875rem;
+            color: #777;
+            border-top: 1px solid #e0e0e0;
+            margin-top: 4rem;
+        }
+        .confirmation {
+            text-align: center;
+            color: green;
+            margin-top: 1rem;
+            font-weight: bold;
+>>>>>>> theirs
         }
     </style>
 </head>
 <body>
+<<<<<<< ours
 <<<<<<< ours
 <<<<<<< ours
     <h1>Welcome to First Project</h1>
@@ -224,11 +311,47 @@
                 <h3>Health Records</h3>
                 <p>Store and track your medical history securely in one place.</p>
             </div>
+=======
+    <header>
+        <h1>Welcome to the Doctor Service App</h1>
+        <p>Your health, our priority.</p>
+    </header>
+    <main>
+        <section class="service">
+            <h2>Our Services</h2>
+            <ul>
+                <li>24/7 Doctor Availability</li>
+                <li>Online Appointments</li>
+                <li>Prescription Refills</li>
+                <li>Health Consultation</li>
+            </ul>
+        </section>
+        <section class="appointment-form">
+            <h2>Book an Appointment</h2>
+            <form id="appointmentForm">
+                <label for="name">Full Name</label>
+                <input type="text" id="name" name="name" required />
+                <label for="email">Email Address</label>
+                <input type="email" id="email" name="email" required />
+                <label for="service">Service</label>
+                <select id="service" name="service" required>
+                    <option value="">Select a service</option>
+                    <option value="consultation">Health Consultation</option>
+                    <option value="appointment">Online Appointment</option>
+                    <option value="prescription">Prescription Refill</option>
+                </select>
+                <label for="date">Preferred Date</label>
+                <input type="date" id="date" name="date" required />
+                <button type="submit">Submit</button>
+            </form>
+            <div id="confirmation" class="confirmation" style="display:none;">Thank you! Your appointment request has been received.</div>
+>>>>>>> theirs
         </section>
     </main>
     <footer>
         &copy; 2024 Doctor Service App. All rights reserved.
     </footer>
+<<<<<<< ours
 >>>>>>> theirs
 =======
         <p class="description">Book your appointment with a trusted doctor easily through our portal.</p>
@@ -337,6 +460,23 @@
     <p>Welcome to the Doctor Service App landing page. Our platform provides an easy and reliable way to book appointments with top health specialists online.</p>
     <a href="#" class="btn">Get Started</a>
   </main>
+>>>>>>> theirs
+=======
+    <script>
+        document.getElementById('appointmentForm').addEventListener('submit', function(event) {
+            event.preventDefault();
+            // Simple frontend form submission handling simulation
+            const name = this.name.value.trim();
+            const email = this.email.value.trim();
+            const service = this.service.value;
+            const date = this.date.value;
+            if (name && email && service && date) {
+                this.style.display = 'none';
+                document.getElementById('confirmation').style.display = 'block';
+                // Normally would send data via fetch or similar here
+            }
+        });
+    </script>
 >>>>>>> theirs
 </body>
 </html>
