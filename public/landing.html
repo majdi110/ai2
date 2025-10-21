@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SaaS Product Landing Page</title>
+  <style>
+    /* Reset and base */
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #f9f9f9;
+      color: #333;
+      line-height: 1.6;
+    }
+
+    a {
+      color: #0077ff;
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+
+    /* Container */
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 1rem;
+    }
+
+    /* Hero Section */
+    .hero {
+      background: linear-gradient(135deg, #667eea, #764ba2);
+      color: white;
+      padding: 4rem 1rem 5rem;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      min-height: 75vh;
+    }
+    .hero h1 {
+      font-size: 3rem;
+      margin-bottom: 1rem;
+      font-weight: 700;
+      text-shadow: 0 2px 6px rgba(0,0,0,0.3);
+    }
+    .hero p {
+      font-size: 1.25rem;
+      margin-bottom: 2rem;
+      max-width: 600px;
+      margin-left: auto;
+      margin-right: auto;
+      text-shadow: 0 1px 3px rgba(0,0,0,0.2);
+    }
+    .hero button {
+      background-color: #ff6b6b;
+      border: none;
+      padding: 1rem 2rem;
+      font-size: 1.2rem;
+      color: white;
+      border-radius: 30px;
+      cursor: pointer;
+      font-weight: 600;
+      box-shadow: 0 5px 15px rgba(255,107,107,0.4);
+      transition: background-color 0.3s ease;
+      align-self: center;
+      max-width: 200px;
+    }
+    .hero button:hover {
+      background-color: #ff4757;
+    }
+
+    /* Feature Cards */
+    section.features {
+      padding: 4rem 1rem 3rem;
+      background: white;
+    }
+    .features .container {
+      display: flex;
+      gap: 2rem;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .feature-card {
+      background: #f1f5f9;
+      padding: 2rem;
+      border-radius: 12px;
+      box-shadow: 0 6px 12px rgba(102,126,234,0.15);
+      flex: 1 1 280px;
+      max-width: 320px;
+      text-align: center;
+      transition: box-shadow 0.3s ease;
+    }
+    .feature-card:hover {
+      box-shadow: 0 12px 20px rgba(102,126,234,0.3);
+    }
+    .feature-card svg {
+      width: 48px;
+      height: 48px;
+      margin-bottom: 1rem;
+      fill: #667eea;
+    }
+    .feature-card h3 {
+      margin-bottom: 0.75rem;
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: #333;
+    }
+    .feature-card p {
+      color: #555;
+      font-size: 1rem;
+    }
+
+    /* Pricing Table */
+    section.pricing {
+      padding: 4rem 1rem 4rem;
+      background: #fafafa;
+      text-align: center;
+    }
+    .pricing .container {
+      display: flex;
+      gap: 2rem;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .pricing-card {
+      background: white;
+      border-radius: 16px;
+      box-shadow: 0 8px 20px rgba(118,75,162,0.1);
+      flex: 1 1 280px;
+      max-width: 320px;
+      padding: 3rem 2rem 2.5rem;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      transition: transform 0.3s ease, box-shadow 0.3s ease;
+    }
+    .pricing-card:hover {
+      transform: translateY(-8px);
+      box-shadow: 0 20px 40px rgba(118,75,162,0.15);
+    }
+    .pricing-card.popular {
+      border: 3px solid #764ba2;
+      box-shadow: 0 20px 40px rgba(118,75,162,0.2);
+      transform: scale(1.05);
+      z-index: 1;
+    }
+    .pricing-card h3 {
+      margin-bottom: 1rem;
+      font-size: 1.5rem;
+      color: #764ba2;
+      font-weight: 700;
+    }
+    .pricing-card .price {
+      font-size: 3rem;
+      margin-bottom: 0.5rem;
+      color: #333;
+      font-weight: 800;
+    }
+    .pricing-card .duration {
+      color: #777;
+      margin-bottom: 1.5rem;
+      font-size: 1rem;
+    }
+    .pricing-card ul {
+      list-style: none;
+      margin-bottom: 2rem;
+      color: #555;
+      text-align: left;
+      padding-left: 1rem;
+    }
+    .pricing-card ul li {
+      margin-bottom: 0.75rem;
+      position: relative;
+      padding-left: 24px;
+    }
+    .pricing-card ul li::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 7px;
+      width: 14px;
+      height: 14px;
+      background: #764ba2;
+      border-radius: 50%;
+    }
+    .pricing-card button {
+      background-color: #764ba2;
+      color: white;
+      border: none;
+      padding: 1rem;
+      font-size: 1.1rem;
+      font-weight: 600;
+      border-radius: 30px;
+      cursor: pointer;
+      transition: background-color 0.3s ease;
+      width: 100%;
+    }
+    .pricing-card button:hover {
+      background-color: #5a3174;
+    }
+
+    /* Contact Form */
+    section.contact {
+      padding: 4rem 1rem 4rem;
+      background: white;
+      text-align: center;
+    }
+    section.contact h2 {
+      font-size: 2rem;
+      margin-bottom: 2rem;
+      color: #333;
+      font-weight: 700;
+    }
+    form.contact-form {
+      max-width: 500px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 1.2rem;
+    }
+    form.contact-form label {
+      text-align: left;
+      font-weight: 600;
+      color: #555;
+      font-size: 1rem;
+    }
+    form.contact-form input,
+    form.contact-form textarea {
+      padding: 0.8rem 1rem;
+      font-size: 1rem;
+      border: 1.5px solid #ccc;
+      border-radius: 8px;
+      resize: vertical;
+      transition: border-color 0.3s ease;
+    }
+    form.contact-form input:focus,
+    form.contact-form textarea:focus {
+      border-color: #764ba2;
+      outline: none;
+    }
+    form.contact-form button {
+      background-color: #764ba2;
+      border: none;
+      color: white;
+      padding: 1rem;
+      font-size: 1.2rem;
+      border-radius: 30px;
+      cursor: pointer;
+      font-weight: 700;
+      transition: background-color 0.3s ease;
+    }
+    form.contact-form button:hover {
+      background-color: #5a3174;
+    }
+
+    /* Responsive Adjustments */
+    @media (max-width: 768px) {
+      .features .container,
+      .pricing .container {
+        flex-direction: column;
+        align-items: center;
+      }
+      .hero h1 {
+        font-size: 2.25rem;
+      }
+      .hero p {
+        font-size: 1rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <h1>Super SaaS Product</h1>
+    <p>Power your business with the easiest and most powerful SaaS solution on the market.</p>
+    <button>Get Started</button>
+  </header>
+
+  <section class="features">
+    <div class="container">
+      <article class="feature-card">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 2L2 7h20L12 2zM2 7v13h20V7H2zm10 7c-1.1 0-2 .9-2 2h4c0-1.1-.9-2-2-2z"/></svg>
+        <h3>Easy Setup</h3>
+        <p>Get started within minutes with just a few clicks — no coding required.</p>
+      </article>
+      <article class="feature-card">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14l7-3 7 3V5c0-1.1-.9-2-2-2z"/></svg>
+        <h3>Secure & Reliable</h3>
+        <p>We use state-of-the-art encryption and infrastructure to keep your data safe.</p>
+      </article>
+      <article class="feature-card">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.41 4.42 3 7.5 3c1.74 0 3.41 1 4.5 2.09C13.09 4 14.76 3 16.5 3 19.58 3 22 5.41 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+        <h3>24/7 Support</h3>
+        <p>Our dedicated team is here to help you anytime, anywhere.</p>
+      </article>
+    </div>
+  </section>
+
+  <section class="pricing">
+    <div class="container">
+      <article class="pricing-card">
+        <h3>Basic</h3>
+        <div class="price">$9<span style="font-size:1rem;">/mo</span></div>
+        <div class="duration">Billed monthly</div>
+        <ul>
+          <li>Up to 5 users</li>
+          <li>Basic analytics</li>
+          <li>Email support</li>
+        </ul>
+        <button>Select</button>
+      </article>
+      <article class="pricing-card popular">
+        <h3>Pro</h3>
+        <div class="price">$29<span style="font-size:1rem;">/mo</span></div>
+        <div class="duration">Billed monthly</div>
+        <ul>
+          <li>Up to 50 users</li>
+          <li>Advanced analytics</li>
+          <li>Priority support</li>
+          <li>Custom integrations</li>
+        </ul>
+        <button>Select</button>
+      </article>
+      <article class="pricing-card">
+        <h3>Enterprise</h3>
+        <div class="price">Contact Us</div>
+        <div class="duration">Custom pricing</div>
+        <ul>
+          <li>Unlimited users</li>
+          <li>Dedicated account manager</li>
+          <li>Custom analytics</li>
+          <li>Enterprise level SLA</li>
+        </ul>
+        <button>Contact</button>
+      </article>
+    </div>
+  </section>
+
+  <section class="contact">
+    <h2>Contact Us</h2>
+    <form class="contact-form" action="#" method="POST">
+      <label for="name">Name</label>
+      <input type="text" id="name" name="name" placeholder="Your full name" required />
+
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" placeholder="you@example.com" required />
+
+      <label for="message">Message</label>
+      <textarea id="message" name="message" rows="5" placeholder="Write your message here..." required></textarea>
+
+      <button type="submit">Send Message</button>
+    </form>
+  </section>
+</body>
+</html>
