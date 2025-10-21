@@ -7,6 +7,7 @@
     <style>
         body {
             font-family: Arial, sans-serif;
+<<<<<<< ours
             max-width: 600px;
             margin: 2rem auto;
             padding: 1rem;
@@ -74,10 +75,87 @@
             text-align: center;
             color: #888;
             margin-top: 1rem;
+=======
+            background: #f4f7f8;
+            margin: 0;
+            padding: 20px;
+            color: #333;
+        }
+        h1 {
+            text-align: center;
+            color: #2c3e50;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: #fff;
+            padding: 20px 30px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            border-radius: 8px;
+        }
+        form {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        input[type=text], input[type=number] {
+            flex: 1 1 150px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        button {
+            padding: 10px 20px;
+            background-color: #3498db;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background-color 0.3s ease;
+        }
+        button:hover {
+            background-color: #2980b9;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 12px 15px;
+            text-align: left;
+        }
+        th {
+            background-color: #2980b9;
+            color: white;
+        }
+        .no-items {
+            text-align: center;
+            color: #999;
+            margin-top: 20px;
+            font-style: italic;
+        }
+        .delete-btn {
+            background-color: #e74c3c;
+            border-radius: 4px;
+            border: none;
+            color: white;
+            padding: 5px 10px;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+        }
+        .delete-btn:hover {
+            background-color: #c0392b;
+>>>>>>> theirs
         }
     </style>
 </head>
 <body>
+<<<<<<< ours
     <h1>Inventory Management</h1>
     <form id="addItemForm">
         <input type="text" id="itemName" placeholder="Item Name" required minlength="1" autocomplete="off" />
@@ -174,6 +252,85 @@
 
         // Initial render
         renderItems();
+=======
+    <div class="container">
+        <h1>Inventory Management</h1>
+        <form id="item-form">
+            <input type="text" id="item-name" placeholder="Item Name" required>
+            <input type="number" id="item-qty" placeholder="Quantity" min="1" required>
+            <button type="submit">Add Item</button>
+        </form>
+        <table>
+            <thead>
+                <tr>
+                    <th>Item Name</th>
+                    <th>Quantity</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody id="inventory-list">
+            </tbody>
+        </table>
+        <p class="no-items" id="no-items-msg">No items in inventory.</p>
+    </div>
+    <script>
+        const form = document.getElementById('item-form');
+        const itemNameInput = document.getElementById('item-name');
+        const itemQtyInput = document.getElementById('item-qty');
+        const inventoryList = document.getElementById('inventory-list');
+        const noItemsMsg = document.getElementById('no-items-msg');
+
+        let inventory = [];
+
+        function renderInventory() {
+            inventoryList.innerHTML = '';
+            if (inventory.length === 0) {
+                noItemsMsg.style.display = 'block';
+                return;
+            }
+            noItemsMsg.style.display = 'none';
+            inventory.forEach((item, index) => {
+                const tr = document.createElement('tr');
+
+                const nameTd = document.createElement('td');
+                nameTd.textContent = item.name;
+
+                const qtyTd = document.createElement('td');
+                qtyTd.textContent = item.qty;
+
+                const actionTd = document.createElement('td');
+                const deleteBtn = document.createElement('button');
+                deleteBtn.textContent = 'Delete';
+                deleteBtn.className = 'delete-btn';
+                deleteBtn.addEventListener('click', () => {
+                    inventory.splice(index, 1);
+                    renderInventory();
+                });
+                actionTd.appendChild(deleteBtn);
+
+                tr.appendChild(nameTd);
+                tr.appendChild(qtyTd);
+                tr.appendChild(actionTd);
+                inventoryList.appendChild(tr);
+            });
+        }
+
+        form.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const name = itemNameInput.value.trim();
+            const qty = parseInt(itemQtyInput.value, 10);
+            if (name === '' || isNaN(qty) || qty < 1) {
+                alert('Please enter a valid item name and quantity.');
+                return;
+            }
+            inventory.push({ name, qty });
+            itemNameInput.value = '';
+            itemQtyInput.value = '';
+            renderInventory();
+        });
+
+        renderInventory();
+>>>>>>> theirs
     </script>
 </body>
 </html>
