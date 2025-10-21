@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Inventory Management App</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 2rem auto;
+            padding: 1rem;
+            background-color: #f9f9f9;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+        }
+        h1 {
+            text-align: center;
+        }
+        form {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+        input[type="text"], input[type="number"] {
+            flex: 1 1 140px;
+            padding: 0.5rem;
+            font-size: 1rem;
+        }
+        button {
+            padding: 0.5rem 1rem;
+            font-size: 1rem;
+            cursor: pointer;
+            background-color: #007bff;
+            border: none;
+            color: white;
+            border-radius: 4px;
+            transition: background-color 0.3s ease;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        ul {
+            list-style-type: none;
+            padding: 0;
+        }
+        li {
+            background: white;
+            margin-bottom: 0.5rem;
+            padding: 0.75rem;
+            border-radius: 4px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 0 5px rgba(0,0,0,0.05);
+        }
+        .item-info {
+            flex: 1;
+        }
+        .delete-btn {
+            background-color: #dc3545;
+            border: none;
+            color: white;
+            padding: 0.4rem 0.8rem;
+            cursor: pointer;
+            border-radius: 4px;
+            font-size: 0.9rem;
+        }
+        .delete-btn:hover {
+            background-color: #a71d2a;
+        }
+        .empty-message {
+            text-align: center;
+            color: #888;
+            margin-top: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <h1>Inventory Management</h1>
+    <form id="addItemForm">
+        <input type="text" id="itemName" placeholder="Item Name" required minlength="1" autocomplete="off" />
+        <input type="number" id="itemQuantity" placeholder="Quantity" required min="1" />
+        <button type="submit">Add Item</button>
+    </form>
+    <ul id="itemsList">
+    </ul>
+    <p class="empty-message" id="emptyMessage">No items in inventory.</p>
+
+    <script>
+        // Utility to save/load inventory to/from localStorage
+        const STORAGE_KEY = 'inventoryItems';
+
+        function saveItems(items) {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+        }
+
+        function loadItems() {
+            const stored = localStorage.getItem(STORAGE_KEY);
+            if (!stored) return [];
+            try {
+                return JSON.parse(stored);
+            } catch (e) {
+                console.error('Failed to parse stored inventory items', e);
+                return [];
+            }
+        }
+
+        function renderItems() {
+            const itemsList = document.getElementById('itemsList');
+            const emptyMessage = document.getElementById('emptyMessage');
+            itemsList.innerHTML = '';
+            const items = loadItems();
+            if (items.length === 0) {
+                emptyMessage.style.display = 'block';
+                return;
+            } else {
+                emptyMessage.style.display = 'none';
+            }
+            items.forEach((item, idx) => {
+                const li = document.createElement('li');
+                li.dataset.index = idx;
+                const infoDiv = document.createElement('div');
+                infoDiv.className = 'item-info';
+                infoDiv.textContent = `${item.name} (Quantity: ${item.quantity})`;
+                const delBtn = document.createElement('button');
+                delBtn.className = 'delete-btn';
+                delBtn.textContent = 'Delete';
+                delBtn.addEventListener('click', () => {
+                    deleteItem(idx);
+                });
+                li.appendChild(infoDiv);
+                li.appendChild(delBtn);
+                itemsList.appendChild(li);
+            });
+        }
+
+        function addItem(name, quantity) {
+            const items = loadItems();
+            // If item exists, update quantity
+            const index = items.findIndex(i => i.name.toLowerCase() === name.toLowerCase());
+            if (index !== -1) {
+                items[index].quantity += quantity;
+            } else {
+                items.push({name, quantity});
+            }
+            saveItems(items);
+            renderItems();
+        }
+
+        function deleteItem(index) {
+            const items = loadItems();
+            if (index >= 0 && index < items.length) {
+                items.splice(index, 1);
+                saveItems(items);
+                renderItems();
+            }
+        }
+
+        document.getElementById('addItemForm').addEventListener('submit', event => {
+            event.preventDefault();
+            const nameInput = document.getElementById('itemName');
+            const quantityInput = document.getElementById('itemQuantity');
+            const name = nameInput.value.trim();
+            const quantity = parseInt(quantityInput.value, 10);
+            if (name && !isNaN(quantity) && quantity > 0) {
+                addItem(name, quantity);
+                nameInput.value = '';
+                quantityInput.value = '';
+                nameInput.focus();
+            }
+        });
+
+        // Initial render
+        renderItems();
+    </script>
+</body>
+</html>
