@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>AI2 • Login</title>
+<style>
+  :root{
+    --bg:#0b0b0f;--panel:#14141c;--muted:#9aa0aa;--text:#e8eaf0;
+    --pri:#7c5cff;--pri2:#6aa4ff;--ok:#22c55e;--err:#ef4444;--br:#262636;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,Segoe UI,Roboto,Ubuntu,sans-serif}
+  .wrap{max-width:880px;margin:40px auto;padding:0 16px}
+  .card{background:var(--panel);border:1px solid var(--br);border-radius:14px;padding:20px;margin-bottom:16px}
+  h1{font-size:22px;margin:0 0 12px}
+  label{display:block;font-size:12px;color:var(--muted);margin:10px 0 6px}
+  input{width:100%;padding:12px;border-radius:10px;border:1px solid var(--br);background:#0f0f16;color:var(--text)}
+  .row{display:grid;gap:12px;grid-template-columns:repeat(2,minmax(0,1fr))}
+  button{background:linear-gradient(135deg,var(--pri),var(--pri2));color:#fff;border:0;border-radius:12px;padding:12px 16px;font-weight:700;cursor:pointer}
+  .muted{color:var(--muted);font-size:12px;margin-top:6px}
+  .right{display:flex;gap:10px;justify-content:flex-end}
+  .kbd{font:12px/1.2 ui-monospace,Menlo,Consolas,monospace;background:#0f0f16;border:1px solid var(--br);padding:4px 6px;border-radius:6px;color:#d6d6ff}
+  .status{margin-top:10px;font-size:12px}
+  .ok{color:var(--ok)} .err{color:var(--err)}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>AI Webapp Builder • Sign in</h1>
+      <p class="muted">Save your connection once. We store it in <span class="kbd">localStorage.ai2_env</span>.</p>
+      <div class="row">
+        <div>
+          <label>API Base</label>
+          <input id="apiBase" placeholder="https://datav.belocloud.com/ai2" />
+        </div>
+        <div>
+          <label>API Token (optional)</label>
+          <input id="apiToken" placeholder="Bearer token for /plan" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Dry-run Key (for /diff_dryrun)</label>
+          <input id="dryrunKey" placeholder="Paste X-Dryrun-Key" />
+        </div>
+        <div>
+          <label>Default Base Branch</label>
+          <input id="baseBranch" value="public" />
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h1>User</h1>
+      <div class="row">
+        <div>
+          <label>User ID</label>
+          <input id="userId" placeholder="e.g. u1" />
+        </div>
+        <div>
+          <label>Name</label>
+          <input id="name" placeholder="Your display name" />
+        </div>
+      </div>
+      <label>Email</label>
+      <input id="email" placeholder="you@example.com" />
+      <div class="right" style="margin-top:14px">
+        <button id="save">Save & Go to Dashboard</button>
+      </div>
+      <div id="status" class="status"></div>
+      <p class="muted">You can edit profile later; it’s persisted as JSON in <span class="kbd">public/users/&lt;userId&gt;/profile.json</span>.</p>
+    </div>
+  </div>
+
+<script>
+const $ = s=>document.querySelector(s);
+const now = ()=>new Date().toISOString();
+
+function saveEnv(){
+  const env = {
+    API_BASE: $('#apiBase').value.trim().replace(/\/+$/,''),
+    API_TOKEN: $('#apiToken').value.trim(),
+    DRYRUN_KEY: $('#dryrunKey').value.trim(),
+    BASE_BRANCH: $('#baseBranch').value.trim() || 'public'
+  };
+  localStorage.setItem('ai2_env', JSON.stringify(env));
+  return env;
+}
+
+function preset(){
+  const env = JSON.parse(localStorage.getItem('ai2_env')||'{}');
+  $('#apiBase').value = env.API_BASE || 'https://datav.belocloud.com/ai2';
+  $('#apiToken').value = env.API_TOKEN || '';
+  $('#dryrunKey').value = env.DRYRUN_KEY || '';
+  $('#baseBranch').value = env.BASE_BRANCH || 'public';
+
+  const prof = JSON.parse(localStorage.getItem('ai2_user')||'{}');
+  $('#userId').value = prof.userId || 'u1';
+  $('#name').value = prof.name || '';
+  $('#email').value = prof.email || '';
+}
+preset();
+
+$('#save').onclick = async ()=>{
+  const env = saveEnv();
+  const user = {
+    userId: $('#userId').value.trim() || 'u1',
+    name: $('#name').value.trim(),
+    email: $('#email').value.trim(),
+    createdAt: now(), updatedAt: now()
+  };
+  localStorage.setItem('ai2_user', JSON.stringify(user));
+  $('#status').textContent = 'Saved ✓';
+  $('#status').className = 'status ok';
+  location.href = `./user.html?userId=${encodeURIComponent(user.userId)}`;
+};
+</script>
+</body>
+</html>

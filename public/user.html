@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>AI2 • User Dashboard</title>
+<style>
+  :root{
+    --bg:#0b0b10;--panel:#14141c;--muted:#96a0ad;--text:#e9ecf2;--br:#262636;
+    --pri:#7c5cff;--pri2:#6aa4ff;--ok:#22c55e;--err:#ef4444;
+  }
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,Segoe UI,Roboto,Ubuntu,sans-serif}
+  header{display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid var(--br);background:#0e0e15}
+  h1{font-size:18px;margin:0}
+  .wrap{max-width:1200px;margin:24px auto;padding:0 16px;display:grid;gap:16px;grid-template-columns:1fr 1fr}
+  .card{background:var(--panel);border:1px solid var(--br);border-radius:14px;padding:16px}
+  label{display:block;color:var(--muted);font-size:12px;margin:8px 0 6px}
+  input{width:100%;padding:12px;border-radius:10px;border:1px solid var(--br);background:#0f0f16;color:var(--text)}
+  button{background:linear-gradient(135deg,var(--pri),var(--pri2));color:#fff;border:0;border-radius:12px;padding:10px 14px;font-weight:700;cursor:pointer}
+  .tiny{font-size:12px;margin-top:8px;color:var(--muted)}
+  .tiny.ok{color:var(--ok)} .tiny.err{color:var(--err)}
+  ul{list-style:none;margin:8px 0 0;padding:0}
+  li{display:flex;align-items:center;justify-content:space-between;border:1px solid var(--br);background:#0f0f16;padding:10px 12px;border-radius:10px;margin:8px 0}
+  .row{display:flex;gap:10px;align-items:center}
+  .pill{font:12px; color:#cbd5ff;background:#1a1a28;border:1px solid var(--br);padding:4px 8px;border-radius:999px}
+  .muted{color:var(--muted);font-size:12px}
+  .right{display:flex;gap:8px;justify-content:flex-end;margin-top:10px}
+  .link{color:#cbd5ff;text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>User Dashboard</h1>
+  <div class="row">
+    <span id="envHint" class="pill"></span>
+    <button id="logout">Logout</button>
+  </div>
+</header>
+
+<div class="wrap">
+  <section class="card">
+    <h2 style="margin:0 0 6px">User Profile</h2>
+    <div class="muted">Stored at <code>public/users/&lt;userId&gt;/profile.json</code></div>
+
+    <label>User ID</label>
+    <input id="userId" readonly />
+
+    <label>Name</label>
+    <input id="name" placeholder="Your name"/>
+
+    <label>Email</label>
+    <input id="email" placeholder="you@example.com"/>
+
+    <div class="right">
+      <button id="saveProfile">Save Profile</button>
+    </div>
+    <div id="statusProfile" class="tiny">Ready</div>
+  </section>
+
+  <section class="card">
+    <h2 style="margin:0 0 6px">Projects</h2>
+    <div class="muted">Index stored at <code>public/users/&lt;userId&gt;/projects/index.json</code></div>
+
+    <div class="row" style="margin-top:8px">
+      <input id="newProjectName" placeholder="New project name"/>
+      <button id="addProject">Add</button>
+    </div>
+    <ul id="projectList"></ul>
+    <div id="statusProjects" class="tiny">Ready</div>
+  </section>
+</div>
+
+<script>
+/* ---------- tiny utils ---------- */
+const $ = s=>document.querySelector(s);
+const now = ()=>new Date().toISOString();
+const qp = new URLSearchParams(location.search);
+const userId = qp.get('userId') || (JSON.parse(localStorage.getItem('ai2_user')||'{}').userId || 'u1');
+$('#userId').value = userId;
+
+const ENV = JSON.parse(localStorage.getItem('ai2_env')||'{}');
+$('#envHint').textContent = ENV.API_BASE ? new URL(ENV.API_BASE).host : 'no API';
+
+/* JSON helpers */
+async function getJSON(path){
+  const url = `/ai2/static/${path}`; // your server maps /static -> /public
+  const res = await fetch(url,{cache:'no-store'});
+  if(!res.ok) return null;
+  return res.json();
+}
+function pretty(o){ return JSON.stringify(o, null, 2) + '\n'; }
+function lineize(s){ return String(s ?? '').replace(/\r\n/g,'\n').replace(/\r/g,'\n'); }
+function newFileDiff(path, content){
+  const lines = lineize(content).split('\n'); if(lines.at(-1)==='') lines.pop();
+  let body = ''; for(const L of lines) body += '+'+L+'\n';
+  return `diff --git a/${path} b/${path}
+new file mode 100644
+--- /dev/null
++++ b/${path}
+@@ -0,0 +1,${lines.length} @@
+${body}`;
+}
+function replaceFileDiff(path, oldContent, newContent){
+  const A = lineize(oldContent).split('\n'); if(A.at(-1)==='') A.pop();
+  const B = lineize(newContent).split('\n'); if(B.at(-1)==='') B.pop();
+  let body = '';
+  for(const L of A) body += '-'+L+'\n';
+  for(const L of B) body += '+'+L+'\n';
+  return `diff --git a/${path} b/${path}
+--- a/${path}
++++ b/${path}
+@@ -1,${A.length} +1,${B.length} @@
+${body}`;
+}
+async function dryrun(diff){
+  const base = (ENV.API_BASE||'').replace(/\/+$/,'');
+  const headers = {'Content-Type':'application/json'};
+  if(ENV.DRYRUN_KEY) headers['X-Dryrun-Key'] = ENV.DRYRUN_KEY;
+  const r = await fetch(`${base}/diff_dryrun`,{method:'POST',headers,body:JSON.stringify({diff,base_branch:ENV.BASE_BRANCH||'public'})});
+  const t = await r.text(); let j; try{ j = t ? JSON.parse(t):null; }catch{}
+  if(!r.ok || (j && j.ok===false)){ const msg=(j && (j.detail||j.error))||t||`HTTP ${r.status}`; const e=new Error(msg); e._dryrun=true; throw e;}
+  return j||{ok:true};
+}
+async function applyPlan(patch){
+  const base = (ENV.API_BASE||'').replace(/\/+$/,'');
+  const headers = {'Content-Type':'application/json','X-Idempotency-Key':'ui-'+Date.now()};
+  if(ENV.API_TOKEN) headers.Authorization = 'Bearer '+ENV.API_TOKEN;
+  const body = {
+    prompt:`Apply EXACTLY this unified diff to the repo (base branch ${(ENV.BASE_BRANCH||'public')}).
+
+${patch}
+`,
+    preview_only:false, return_combined_diff:true
+  };
+  const r = await fetch(`${base}/plan`,{method:'POST',headers,body:JSON.stringify(body)});
+  const t = await r.text(); let j; try{ j=JSON.parse(t);}catch{}
+  if(!r.ok || !j || j.ok===false){ throw new Error((j&&(j.error||j.detail))||t||`HTTP ${r.status}`); }
+  return j;
+}
+
+/* ---------- profile ---------- */
+const paths = {
+  profile: `users/${userId}/profile.json`,
+  projIndex: `users/${userId}/projects/index.json`
+};
+let prof = null;
+let idx = [];
+
+async function init(){
+  $('#name').value=''; $('#email').value='';
+  prof = await getJSON(paths.profile);
+  if(prof){ $('#name').value=prof.name||''; $('#email').value=prof.email||''; }
+  const list = await getJSON(paths.projIndex);
+  idx = Array.isArray(list)?list:[];
+  renderProjects(idx);
+}
+init();
+
+function renderProjects(list){
+  const ul = $('#projectList'); ul.innerHTML='';
+  if(!list.length){ ul.innerHTML = `<li><span class="muted">No projects yet.</span></li>`; return; }
+  for(const p of list){
+    const li = document.createElement('li');
+    li.innerHTML = `<div>
+        <div style="font-weight:700">${p.name}</div>
+        <div class="muted" style="font-size:12px">id: ${p.id}</div>
+      </div>
+      <div class="row">
+        <a class="link" href="./project.html?userId=${encodeURIComponent(userId)}&projectId=${encodeURIComponent(p.id)}">Open</a>
+      </div>`;
+    ul.appendChild(li);
+  }
+}
+
+function slug(s){ return s.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'').slice(0,60)||'p-'+Date.now(); }
+
+/* save handlers */
+$('#saveProfile').onclick = async ()=>{
+  const next = {userId, name:$('#name').value.trim(), email:$('#email').value.trim(), createdAt: prof?.createdAt || now(), updatedAt: now()};
+  const patch = prof ? replaceFileDiff(paths.profile, pretty(prof), pretty(next))
+                     : newFileDiff(paths.profile, pretty(next));
+  try{
+    try{ await dryrun(patch); }catch(e){ $('#statusProfile').textContent = 'Dryrun: '+e.message+' (continuing)'; $('#statusProfile').className='tiny'; }
+    await applyPlan(patch);
+    prof = next;
+    $('#statusProfile').textContent='Saved ✓';
+    $('#statusProfile').className='tiny ok';
+  }catch(e){ $('#statusProfile').textContent='Error: '+e.message; $('#statusProfile').className='tiny err'; }
+};
+
+$('#addProject').onclick = async ()=>{
+  const name = $('#newProjectName').value.trim(); if(!name) return;
+  const p = { id: slug(name), name, framework:'html', start_path:'', createdAt:now(), updatedAt:now() };
+  const nextIdx = [...idx.filter(x=>x.id!==p.id), p].sort((a,b)=>a.name.localeCompare(b.name));
+  const patch = idx.length ? replaceFileDiff(paths.projIndex, pretty(idx), pretty(nextIdx))
+                           : newFileDiff(paths.projIndex, pretty(nextIdx));
+  try{
+    try{ await dryrun(patch); }catch(e){ $('#statusProjects').textContent='Dryrun: '+e.message+' (continuing)'; $('#statusProjects').className='tiny'; }
+    await applyPlan(patch);
+    idx = nextIdx; renderProjects(idx);
+    $('#newProjectName').value = '';
+    $('#statusProjects').textContent='Project added ✓'; $('#statusProjects').className='tiny ok';
+  }catch(e){ $('#statusProjects').textContent='Error: '+e.message; $('#statusProjects').className='tiny err'; }
+};
+
+$('#logout').onclick = ()=>{ localStorage.removeItem('ai2_user'); location.href='./login.html'; };
+</script>
+</body>
+</html>

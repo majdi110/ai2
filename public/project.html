@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>AI2 • Project</title>
+<style>
+  :root{
+    --bg:#0b0b10;--panel:#14141c;--muted:#96a0ad;--text:#e9ecf2;--br:#262636;
+    --pri:#7c5cff;--pri2:#6aa4ff;--ok:#22c55e;--err:#ef4444;
+  }
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,Segoe UI,Roboto,Ubuntu,sans-serif}
+  header{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--br);background:#0e0e15}
+  .row{display:flex;gap:10px;align-items:center}
+  a, .link{color:#cbd5ff;text-decoration:none}
+  .pill{font:12px;color:#cbd5ff;background:#1a1a28;border:1px solid var(--br);padding:4px 8px;border-radius:999px}
+  .wrap{display:grid;grid-template-columns:420px 1fr;gap:12px;max-width:1400px;margin:16px auto;padding:0 12px}
+  .card{background:var(--panel);border:1px solid var(--br);border-radius:14px;overflow:hidden}
+  .head{padding:12px 14px;border-bottom:1px solid var(--br);font-weight:700}
+  .body{padding:12px 14px}
+  textarea{width:100%;min-height:120px;background:#0f0f16;color:var(--text);border:1px solid var(--br);border-radius:10px;padding:10px;resize:vertical}
+  button{background:linear-gradient(135deg,var(--pri),var(--pri2));color:#fff;border:0;border-radius:12px;padding:10px 14px;font-weight:700;cursor:pointer}
+  .muted{color:var(--muted);font-size:12px}
+  .tiny{font-size:12px;margin-top:6px;color:var(--muted)}
+  .tiny.ok{color:var(--ok)} .tiny.err{color:var(--err)}
+  .chat{display:flex;flex-direction:column;gap:10px;max-height:280px;overflow:auto}
+  .bubble{background:#0f0f16;border:1px solid var(--br);padding:10px;border-radius:10px}
+  .me{border-color:#39406a;background:#12142a}
+  iframe{width:100%;height:520px;border:0;background:#fff;border-radius:12px}
+  pre{background:#0f0f16;border:1px solid var(--br);padding:10px;border-radius:10px;overflow:auto;font:12px/1.35 ui-monospace,Menlo,Consolas,monospace;color:#e9f}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  input[type="text"]{width:100%;padding:10px;border-radius:10px;border:1px solid var(--br);background:#0f0f16;color:var(--text)}
+  .toolbar{display:flex;gap:8px;align-items:center;margin-top:8px}
+  .checkbox{display:flex;gap:8px;align-items:center}
+</style>
+</head>
+<body>
+<header>
+  <div class="row">
+    <a class="link" href="./user.html">← Back</a>
+    <div id="crumb" class="pill"></div>
+  </div>
+  <div class="row">
+    <div id="envHint" class="pill"></div>
+    <button id="logout">Logout</button>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- Left: Prompt + Chat + Save -->
+  <section class="card">
+    <div class="head">Prompt & Chat</div>
+    <div class="body">
+      <div class="chat" id="chatView"></div>
+
+      <label class="muted" style="display:block;margin:10px 0 6px">New prompt</label>
+      <textarea id="prompt" placeholder="Describe what to build..."></textarea>
+
+      <div class="toolbar">
+        <button id="run">Generate / Update</button>
+        <label class="checkbox"><input id="sse" type="checkbox"> Stream (SSE)</label>
+      </div>
+
+      <div id="chatStatus" class="tiny">Chat persisted to <code>public/users/&lt;userId&gt;/projects/&lt;projectId&gt;/chat.json</code></div>
+    </div>
+  </section>
+
+  <!-- Right: Preview + Project Info -->
+  <section class="card">
+    <div class="head">Preview</div>
+    <div class="body">
+      <iframe id="preview" title="preview"></iframe>
+      <div class="grid2" style="margin-top:10px">
+        <div>
+          <label class="muted">Start file (relative to <code>public/</code>)</label>
+          <input id="startPath" placeholder="users/u1/projects/p1/app/index.html"/>
+        </div>
+        <div style="display:flex;align-items:flex-end;gap:8px">
+          <button id="saveProject">Save Project</button>
+          <button id="openStatic">Open</button>
+        </div>
+      </div>
+      <div class="tiny" id="projectStatus">Project stored at <code>public/users/&lt;userId&gt;/projects/&lt;projectId&gt;.json</code></div>
+    </div>
+  </section>
+
+  <!-- Files manifest -->
+  <section class="card">
+    <div class="head">Project Files (manifest)</div>
+    <div class="body">
+      <div class="toolbar">
+        <button id="saveFiles">Save files.json</button>
+        <span class="muted">Add paths manually or let generator fill them.</span>
+      </div>
+      <textarea id="filesBox" placeholder='["users/u1/projects/p1/app/index.html"]'></textarea>
+      <div class="tiny" id="filesStatus">Stored at <code>public/users/&lt;userId&gt;/projects/&lt;projectId&gt;/files.json</code></div>
+    </div>
+  </section>
+
+  <!-- Raw events / combined diff -->
+  <section class="card">
+    <div class="head">Events / Combined Diff</div>
+    <div class="body">
+      <pre id="events">// waiting...</pre>
+    </div>
+  </section>
+
+</div>
+
+<script>
+/* ---------- environment & params ---------- */
+const $ = s=>document.querySelector(s);
+const qp = new URLSearchParams(location.search);
+const userId = qp.get('userId') || (JSON.parse(localStorage.getItem('ai2_user')||'{}').userId || 'u1');
+const projectId = qp.get('projectId') || 'p1';
+$('#crumb').textContent = `user:${userId} • project:${projectId}`;
+
+const ENV = JSON.parse(localStorage.getItem('ai2_env')||'{}');
+$('#envHint').textContent = ENV.API_BASE ? new URL(ENV.API_BASE).host : 'no API';
+
+const paths = {
+  rootDir: `users/${userId}/projects/${projectId}`,
+  projectJson: `users/${userId}/projects/${projectId}.json`,
+  filesJson:   `users/${userId}/projects/${projectId}/files.json`,
+  chatJson:    `users/${userId}/projects/${projectId}/chat.json`
+};
+
+function pretty(o){ return JSON.stringify(o, null, 2) + '\n'; }
+function lineize(s){ return String(s ?? '').replace(/\r\n/g,'\n').replace(/\r/g,'\n'); }
+function newFileDiff(path, content){
+  const lines = lineize(content).split('\n'); if(lines.at(-1)==='') lines.pop();
+  let body=''; for(const L of lines) body+='+'+L+'\n';
+  return `diff --git a/${path} b/${path}
+new file mode 100644
+--- /dev/null
++++ b/${path}
+@@ -0,0 +1,${lines.length} @@
+${body}`;
+}
+function replaceFileDiff(path, oldContent, newContent){
+  const A = lineize(oldContent).split('\n'); if(A.at(-1)==='') A.pop();
+  const B = lineize(newContent).split('\n'); if(B.at(-1)==='') B.pop();
+  let body=''; for(const L of A) body+='-'+L+'\n'; for(const L of B) body+='+'+L+'\n';
+  return `diff --git a/${path} b/${path}
+--- a/${path}
++++ b/${path}
+@@ -1,${A.length} +1,${B.length} @@
+${body}`;
+}
+async function getJSON(path){
+  const url = `/ai2/static/${path}`;
+  const r = await fetch(url,{cache:'no-store'});
+  if(!r.ok) return null;
+  return r.json();
+}
+async function dryrun(diff){
+  const base = (ENV.API_BASE||'').replace(/\/+$/,'');
+  const headers={'Content-Type':'application/json'};
+  if(ENV.DRYRUN_KEY) headers['X-Dryrun-Key']=ENV.DRYRUN_KEY;
+  const r = await fetch(`${base}/diff_dryrun`,{method:'POST',headers,body:JSON.stringify({diff,base_branch:ENV.BASE_BRANCH||'public'})});
+  const t = await r.text(); let j; try{ j = t?JSON.parse(t):null; }catch{}
+  if(!r.ok || (j && j.ok===false)){ const msg=(j&&(j.detail||j.error))||t||`HTTP ${r.status}`; const e=new Error(msg); e._dryrun=true; throw e;}
+  return j||{ok:true};
+}
+async function applyPlanPrompt(prompt, stream=false){
+  const base = (ENV.API_BASE||'').replace(/\/+$/,'');
+  const headers={'Content-Type':'application/json','X-Idempotency-Key':'ui-'+Date.now()};
+  if(ENV.API_TOKEN) headers.Authorization='Bearer '+ENV.API_TOKEN;
+  const body = {
+    prompt,
+    preview_only:false,
+    return_combined_diff:true
+  };
+  if(!stream){
+    const r = await fetch(`${base}/plan`,{method:'POST',headers,body:JSON.stringify(body)});
+    const t = await r.text(); let j; try{ j=JSON.parse(t);}catch{}
+    if(!r.ok || !j || j.ok===false){ throw new Error((j&&(j.error||j.detail))||t||`HTTP ${r.status}`); }
+    return j;
+  }else{
+    const r = await fetch(`${base}/plan?stream=1`,{
+      method:'POST',headers:{...headers,'Accept':'text/event-stream'},
+      body:JSON.stringify(body)
+    });
+    const reader = r.body.getReader();
+    const dec = new TextDecoder(); let buf='';
+    while(true){
+      const {done,value} = await reader.read();
+      if(done) break;
+      buf += dec.decode(value,{stream:true});
+      $('#events').textContent = buf;
+    }
+    // not all SSE responses end with a JSON blob; return null and let caller refetch last job if needed
+    return null;
+  }
+}
+
+/* ---------- load project ---------- */
+let project = null;
+let files = [];
+let chat = [];
+
+async function init(){
+  project = await getJSON(paths.projectJson) || { id: projectId, name: projectId, start_path: `${paths.rootDir}/app/index.html`, createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
+  files = await getJSON(paths.filesJson) || [];
+  chat = await getJSON(paths.chatJson) || [];
+
+  $('#startPath').value = project.start_path || `${paths.rootDir}/app/index.html`;
+  $('#filesBox').value = pretty(files);
+  renderChat();
+  refreshPreview();
+}
+init();
+
+function renderChat(){
+  const box = $('#chatView'); box.innerHTML='';
+  for(const m of chat){
+    const div = document.createElement('div');
+    div.className = 'bubble '+(m.role==='user'?'me':'');
+    div.textContent = `[${m.role}] ${m.content}`;
+    box.appendChild(div);
+  }
+  box.scrollTop = 1e6;
+}
+function refreshPreview(){
+  if(!project.start_path){ $('#preview').srcdoc='<style>body{font:14px system-ui}</style><div style="padding:20px">No start file yet.</div>'; return; }
+  $('#preview').src = `/ai2/static/${project.start_path}`;
+}
+
+/* ---------- save JSON helpers ---------- */
+async function saveJson(path, newObj, oldObj){
+  const patch = oldObj ? replaceFileDiff(path, pretty(oldObj), pretty(newObj))
+                       : newFileDiff(path, pretty(newObj));
+  try{ await dryrun(patch); }catch(e){ log(`Dryrun: ${e.message} (continuing)`); }
+  await applyPlanPrompt(`Apply EXACTLY this unified diff to base branch ${(ENV.BASE_BRANCH||'public')}:\n\n${patch}`);
+}
+
+/* ---------- UI actions ---------- */
+$('#logout').onclick = ()=>{ localStorage.removeItem('ai2_user'); location.href='./login.html'; };
+
+$('#saveProject').onclick = async ()=>{
+  const next = {...project, start_path: $('#startPath').value.trim() || project.start_path, updatedAt: new Date().toISOString()};
+  try{
+    await saveJson(paths.projectJson, next, project);
+    project = next;
+    $('#projectStatus').textContent = 'Saved ✓';
+    $('#projectStatus').className = 'tiny ok';
+    refreshPreview();
+  }catch(e){
+    $('#projectStatus').textContent = 'Error: ' + e.message;
+    $('#projectStatus').className = 'tiny err';
+  }
+};
+
+$('#openStatic').onclick = ()=>{
+  if(!project.start_path) return;
+  window.open(`/ai2/static/${project.start_path}`,'_blank');
+};
+
+$('#saveFiles').onclick = async ()=>{
+  let next;
+  try{ next = JSON.parse($('#filesBox').value || '[]'); }catch(e){
+    $('#filesStatus').textContent = 'Invalid JSON'; $('#filesStatus').className='tiny err'; return;
+  }
+  try{
+    await saveJson(paths.filesJson, next, files);
+    files = next;
+    $('#filesStatus').textContent='Saved ✓'; $('#filesStatus').className='tiny ok';
+  }catch(e){
+    $('#filesStatus').textContent='Error: '+e.message; $('#filesStatus').className='tiny err';
+  }
+};
+
+function log(s){ const p = $('#events'); p.textContent += (p.textContent ? '\n' : '') + s; p.scrollTop = 1e6; }
+
+/* ---------- RUN / GENERATE ---------- */
+$('#run').onclick = async ()=>{
+  const text = $('#prompt').value.trim();
+  if(!text) return;
+
+  // persist chat log first
+  const msg = {role:'user', content:text, ts:new Date().toISOString()};
+  const nextChat = [...chat, msg];
+  try{ await saveJson(paths.chatJson, nextChat, chat); chat = nextChat; renderChat(); }catch(e){ log('chat save failed: '+e.message); }
+
+  // compose strong constraints so the model writes into the project dir
+  const constraints = `
+Write code to the repository via your plan patches.
+All created files MUST live under: public/${paths.rootDir}/app
+Create an entry file at: public/${paths.rootDir}/app/index.html
+Prefer plain HTML/CSS/JS for previews.`;
+
+  const fullPrompt = `${text}
+
+${constraints}
+(When modifying, update existing files instead of creating a different page.)`;
+
+  log('Submitting /plan' + ($('#sse').checked?' (stream)':'') + ' …');
+
+  try{
+    const res = await applyPlanPrompt(fullPrompt, $('#sse').checked);
+
+    // Non-stream path: we can parse combined diff to refresh files/start_path
+    if(res && res.plan){
+      const filesCreated = [];
+      for(const step of (res.plan.steps||[])){
+        const m = String(step.diff||'').match(/^\+\+\+ b\/(.+)$/m);
+        if(m) filesCreated.push(m[1]);
+      }
+      // if index was created, set start_path
+      const idx = filesCreated.find(f=>/\/app\/index\.html$/.test(f));
+      if(idx){ project.start_path = idx; $('#startPath').value = idx; await saveJson(paths.projectJson, project, project); }
+      // update files manifest (append uniques)
+      if(filesCreated.length){
+        const set = new Set([...(files||[]), ...filesCreated]);
+        files = [...set]; $('#filesBox').value = pretty(files);
+        await saveJson(paths.filesJson, files, files);
+      }
+      log('Applied plan ✓');
+      $('#chatStatus').textContent = 'Generated ✓'; $('#chatStatus').className='tiny ok';
+      refreshPreview();
+    }else{
+      // Stream: after events end, just refresh preview; files might already be written
+      refreshPreview();
+      $('#chatStatus').textContent = 'Stream done ✓'; $('#chatStatus').className='tiny ok';
+    }
+  }catch(e){
+    log('Error: '+e.message);
+    $('#chatStatus').textContent = 'Error: '+e.message; $('#chatStatus').className='tiny err';
+  }
+};
+</script>
+</body>
+</html>
