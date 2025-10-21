@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<<<<<<< ours
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <<<<<<< ours
@@ -51,17 +52,27 @@
             text-align: center;
 =======
     <title>Doctor Service App</title>
+=======
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Doctor Service Landing Page</title>
+>>>>>>> theirs
     <style>
         body {
             font-family: Arial, sans-serif;
             margin: 0;
             padding: 0;
+<<<<<<< ours
             background: #f2f7fa;
+=======
+            background: #f0f4f8;
+>>>>>>> theirs
             color: #333;
         }
         header {
             background-color: #007bff;
             color: white;
+<<<<<<< ours
             padding: 20px 0;
             text-align: center;
             box-shadow: 0 2px 5px rgba(0,0,0,0.1);
@@ -120,20 +131,82 @@
             color: #666;
             margin-top: 80px;
 >>>>>>> theirs
+=======
+            padding: 1rem 2rem;
+            text-align: center;
+        }
+        main {
+            max-width: 900px;
+            margin: 2rem auto;
+            background: white;
+            border-radius: 8px;
+            padding: 2rem;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            margin-bottom: 0.5rem;
+        }
+        p.description {
+            font-size: 1.1rem;
+            margin-bottom: 2rem;
+        }
+        form {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        label {
+            font-weight: bold;
+        }
+        input, select, textarea {
+            padding: 0.5rem;
+            font-size: 1rem;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 0.75rem;
+            font-size: 1rem;
+            cursor: pointer;
+            border-radius: 4px;
+            transition: background-color 0.3s ease;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        .success-message {
+            margin-top: 1rem;
+            color: green;
+            font-weight: bold;
+        }
+        .error-message {
+            margin-top: 1rem;
+            color: red;
+            font-weight: bold;
+>>>>>>> theirs
         }
     </style>
 </head>
 <body>
+<<<<<<< ours
 <<<<<<< ours
     <h1>Welcome to First Project</h1>
     <p>Your journey starts here. Discover, create, and innovate with us.</p>
     <a href="#" class="button">Get Started</a>
     <footer>&copy; 2024 First Project. All rights reserved.</footer>
 =======
+=======
+>>>>>>> theirs
     <header>
         <h1>Doctor Service</h1>
     </header>
     <main>
+<<<<<<< ours
         <h1>Find the Best Doctors Near You</h1>
         <p class="lead">Our app connects you with qualified doctors easily and quickly. Schedule appointments, consult online, and manage your health all in one place.</p>
         <a href="#" class="btn">Get Started</a>
@@ -155,6 +228,56 @@
     <footer>
         &copy; 2024 Doctor Service App. All rights reserved.
     </footer>
+>>>>>>> theirs
+=======
+        <p class="description">Book your appointment with a trusted doctor easily through our portal.</p>
+        <form id="appointmentForm">
+            <label for="name">Full Name</label>
+            <input type="text" id="name" name="name" required />
+
+            <label for="email">Email Address</label>
+            <input type="email" id="email" name="email" required />
+
+            <label for="phone">Phone Number</label>
+            <input type="tel" id="phone" name="phone" pattern="[0-9+\- ]{7,15}" placeholder="+1234567890" required />
+
+            <label for="service">Select Service</label>
+            <select id="service" name="service" required>
+                <option value="general">General Consultation</option>
+                <option value="dental">Dental Care</option>
+                <option value="cardiology">Cardiology</option>
+                <option value="neurology">Neurology</option>
+                <option value="pediatrics">Pediatrics</option>
+            </select>
+
+            <label for="date">Preferred Appointment Date</label>
+            <input type="date" id="date" name="date" required />
+
+            <label for="notes">Additional Notes</label>
+            <textarea id="notes" name="notes" rows="4" placeholder="Optional"></textarea>
+
+            <button type="submit">Book Appointment</button>
+            <div id="feedbackMessage" role="alert"></div>
+        </form>
+    </main>
+    <script>
+      (function() {
+        const form = document.getElementById('appointmentForm');
+        const feedback = document.getElementById('feedbackMessage');
+        form.addEventListener('submit', function(event) {
+          event.preventDefault();
+          feedback.textContent = '';
+          const formData = new FormData(form);
+          // Simulate sending data to a backend or API
+          setTimeout(() => {
+            // For demo, always success
+            feedback.textContent = 'Appointment booked successfully! We will contact you soon.';
+            feedback.className = 'success-message';
+            form.reset();
+          }, 800);
+        });
+      })();
+    </script>
 >>>>>>> theirs
 </body>
 </html>
