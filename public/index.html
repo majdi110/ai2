@@ -1,4 +1,5 @@
 <<<<<<< ours
+<<<<<<< ours
 <!doctype html>
 <meta charset="utf-8">
 <title>Hello</title>
@@ -14,6 +15,402 @@
 <body>
     <header id="header"></header>
     <script src="app.js"></script>
+</body>
+</html>
+>>>>>>> theirs
+=======
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SaaS Product - Landing Page</title>
+    <style>
+        /* Reset and global styles */
+        *, *::before, *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background-color: #fff;
+        }
+        a {
+            color: #0079ff;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+
+        /* Container */
+        .container {
+            width: 90%;
+            max-width: 1200px;
+            margin: auto;
+            padding: 2rem 0;
+        }
+
+        /* Hero Section */
+        .hero {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            text-align: center;
+            padding: 6rem 1rem 4rem;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }
+        .hero h1 {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            max-width: 700px;
+        }
+        .hero p {
+            font-size: 1.25rem;
+            margin-bottom: 2rem;
+            max-width: 600px;
+        }
+        .hero .btn-primary {
+            background-color: #fff;
+            color: #764ba2;
+            padding: 0.75rem 2rem;
+            border-radius: 30px;
+            font-weight: 600;
+            border: none;
+            cursor: pointer;
+            font-size: 1rem;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+            transition: background-color 0.3s, color 0.3s;
+        }
+        .hero .btn-primary:hover {
+            background-color: #5a3e96;
+            color: #fff;
+        }
+
+        /* Features Section */
+        .features {
+            padding: 4rem 1rem;
+            background-color: #f9f9fb;
+            text-align: center;
+        }
+        .features h2 {
+            margin-bottom: 3rem;
+            font-size: 2.5rem;
+            color: #333;
+        }
+        .feature-cards {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 2rem;
+            max-width: 1000px;
+            margin: auto;
+        }
+        .feature-card {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 4px 11px rgb(80 98 145 / 6%);
+            padding: 2rem;
+            flex: 1 1 280px;
+            max-width: 320px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            transition: box-shadow 0.3s ease;
+        }
+        .feature-card:hover {
+            box-shadow: 0 8px 24px rgb(80 98 145 / 15%);
+        }
+        .feature-icon {
+            width: 64px;
+            height: 64px;
+            margin-bottom: 1.25rem;
+            fill: #764ba2;
+        }
+        .feature-card h3 {
+            margin-bottom: 0.75rem;
+            color: #222;
+        }
+        .feature-card p {
+            color: #555;
+            font-size: 1rem;
+        }
+
+        /* Pricing Section */
+        .pricing {
+            padding: 4rem 1rem;
+            background-color: #fff;
+            text-align: center;
+        }
+        .pricing h2 {
+            margin-bottom: 3rem;
+            font-size: 2.5rem;
+            color: #333;
+        }
+        .pricing-table {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 2rem;
+            max-width: 960px;
+            margin: auto;
+        }
+        .pricing-card {
+            background: #f5f5f7;
+            border-radius: 12px;
+            padding: 2.5rem 2rem;
+            flex: 1 1 280px;
+            max-width: 320px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            box-shadow: 0 4px 15px rgb(80 98 145 / 5%);
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+        .pricing-card:hover {
+            transform: translateY(-8px);
+            box-shadow: 0 10px 20px rgb(80 98 145 / 15%);
+        }
+        .pricing-card.popular {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            box-shadow: 0 15px 25px rgb(80 98 145 / 30%);
+            position: relative;
+            z-index: 1;
+        }
+        .pricing-card.popular .btn-secondary {
+            background-color: #fff;
+            color: #764ba2;
+        }
+        .pricing-card.popular .btn-secondary:hover {
+            background-color: #d4c4f7;
+        }
+        .plan-title {
+            font-size: 1.5rem;
+            margin-bottom: 1rem;
+            font-weight: 700;
+        }
+        .price {
+            font-size: 2.5rem;
+            font-weight: 900;
+            margin-bottom: 1rem;
+        }
+        .price span {
+            font-size: 1.25rem;
+            font-weight: 400;
+            color: #555;
+        }
+        .features-list {
+            list-style: none;
+            color: inherit;
+            margin-bottom: 2rem;
+            text-align: left;
+            flex-grow: 1;
+        }
+        .features-list li {
+            margin-bottom: 0.75rem;
+            padding-left: 1.25rem;
+            position: relative;
+        }
+        .features-list li::before {
+            content: '✔';
+            position: absolute;
+            left: 0;
+            color: #764ba2;
+            font-weight: bold;
+        }
+        .btn-secondary {
+            padding: 0.75rem 1.25rem;
+            background-color: #764ba2;
+            color: white;
+            border: none;
+            border-radius: 30px;
+            font-weight: 600;
+            cursor: pointer;
+            font-size: 1rem;
+            transition: background-color 0.3s ease;
+        }
+        .btn-secondary:hover {
+            background-color: #5a3e96;
+        }
+
+        /* Contact Section */
+        .contact {
+            background-color: #f9f9fb;
+            padding: 4rem 1rem 6rem;
+            text-align: center;
+        }
+        .contact h2 {
+            margin-bottom: 2rem;
+            font-size: 2.5rem;
+            color: #333;
+        }
+        .contact form {
+            max-width: 500px;
+            margin: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 1.25rem;
+        }
+        .contact label {
+            text-align: left;
+            font-weight: 600;
+            color: #444;
+            margin-bottom: 0.25rem;
+            font-size: 1rem;
+        }
+        .contact input,
+        .contact textarea {
+            padding: 0.75rem 1rem;
+            font-size: 1rem;
+            border-radius: 8px;
+            border: 1.5px solid #ccc;
+            resize: vertical;
+            font-family: inherit;
+            transition: border-color 0.3s ease;
+        }
+        .contact input:focus,
+        .contact textarea:focus {
+            border-color: #764ba2;
+            outline: none;
+        }
+        .contact button {
+            padding: 0.75rem 2rem;
+            background-color: #764ba2;
+            color: white;
+            border: none;
+            border-radius: 30px;
+            font-weight: 600;
+            cursor: pointer;
+            font-size: 1rem;
+            transition: background-color 0.3s ease;
+            align-self: center;
+            margin-top: 1rem;
+        }
+        .contact button:hover {
+            background-color: #5a3e96;
+        }
+
+        /* Responsive Design */
+        @media (max-width: 768px) {
+            .feature-cards, .pricing-table {
+                flex-direction: column;
+                max-width: 100%;
+            }
+            .feature-card, .pricing-card {
+                max-width: 100%;
+            }
+            .hero h1 {
+                font-size: 2.25rem;
+            }
+            .hero p {
+                font-size: 1rem;
+            }
+        }
+    </style>
+    <!-- Icons as inline SVGs -->
+    <script type="application/javascript">
+      // No script dependencies for this initial page
+    </script>
+</head>
+<body>
+    <!-- Hero Section -->
+    <section class="hero">
+        <h1>Empower Your Business with Our SaaS Solution</h1>
+        <p>Innovative, scalable, and easy-to-use platform designed to help you grow faster.</p>
+        <button class="btn-primary" onclick="document.getElementById('contact-form').scrollIntoView({behavior:'smooth'})">Get Started</button>
+    </section>
+
+    <!-- Features Section -->
+    <section class="features">
+        <h2>Features That Make a Difference</h2>
+        <div class="feature-cards">
+            <div class="feature-card">
+                <svg class="feature-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" aria-hidden="true">
+                    <circle cx="32" cy="32" r="28" stroke="#764ba2" stroke-width="4" fill="none" />
+                    <path d="M20 32l8 8 16-16" stroke="#764ba2" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+                <h3>Reliable Performance</h3>
+                <p>99.9% uptime ensures your business is always connected.</p>
+            </div>
+            <div class="feature-card">
+                <svg class="feature-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" aria-hidden="true">
+                    <rect x="14" y="20" width="36" height="26" rx="4" ry="4" stroke="#764ba2" stroke-width="4" fill="none" />
+                    <path d="M32 20v-6" stroke="#764ba2" stroke-width="4" stroke-linecap="round" />
+                    <circle cx="32" cy="40" r="4" stroke="#764ba2" stroke-width="4" fill="none" />
+                </svg>
+                <h3>Secure Data</h3>
+                <p>Top-tier encryption and compliance for your peace of mind.</p>
+            </div>
+            <div class="feature-card">
+                <svg class="feature-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" aria-hidden="true">
+                    <path d="M20 32h24" stroke="#764ba2" stroke-width="4" stroke-linecap="round" />
+                    <path d="M32 20v24" stroke="#764ba2" stroke-width="4" stroke-linecap="round" />
+                    <circle cx="32" cy="32" r="28" stroke="#764ba2" stroke-width="4" fill="none" />
+                </svg>
+                <h3>Easy Integration</h3>
+                <p>Plug into your existing tools and workflows with no hassle.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Pricing Section -->
+    <section class="pricing">
+        <h2>Simple Pricing for Every Business</h2>
+        <div class="pricing-table">
+            <div class="pricing-card">
+                <div class="plan-title">Basic</div>
+                <div class="price">$10<span>/mo</span></div>
+                <ul class="features-list">
+                    <li>Up to 5 users</li>
+                    <li>Basic analytics</li>
+                    <li>Email support</li>
+                </ul>
+                <button class="btn-secondary" aria-label="Select Basic Plan">Select</button>
+            </div>
+            <div class="pricing-card popular">
+                <div class="plan-title">Pro</div>
+                <div class="price">$30<span>/mo</span></div>
+                <ul class="features-list">
+                    <li>Up to 25 users</li>
+                    <li>Advanced analytics</li>
+                    <li>Priority support</li>
+                    <li>Integrations</li>
+                </ul>
+                <button class="btn-secondary" aria-label="Select Pro Plan">Select</button>
+            </div>
+            <div class="pricing-card">
+                <div class="plan-title">Enterprise</div>
+                <div class="price">Custom<span></span></div>
+                <ul class="features-list">
+                    <li>Unlimited users</li>
+                    <li>Custom analytics</li>
+                    <li>Dedicated support</li>
+                    <li>Full integrations</li>
+                </ul>
+                <button class="btn-secondary" aria-label="Contact for Enterprise Plan">Contact Us</button>
+            </div>
+        </div>
+    </section>
+
+    <!-- Contact Section -->
+    <section class="contact" id="contact-form">
+        <h2>Contact Us</h2>
+        <form action="#" method="POST">
+            <label for="name">Name</label>
+            <input type="text" id="name" name="name" placeholder="Your full name" required />
+            <label for="email">Email</label>
+            <input type="email" id="email" name="email" placeholder="your.email@example.com" required />
+            <label for="message">Message</label>
+            <textarea id="message" name="message" rows="5" placeholder="How can we help you?" required></textarea>
+            <button type="submit">Send Message</button>
+        </form>
+    </section>
 </body>
 </html>
 >>>>>>> theirs
