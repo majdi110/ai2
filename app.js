@@ -578,6 +578,10 @@ function validatePlanEnvelope(plan) {
     const s = plan.steps[i];
     if (!isObj(s) || typeof s.type !== 'string') return `step_${i}_bad_type`;
     if (s.type === 'patch') {
+      // ---- NEW: Normalize CRLF -> LF BEFORE regex checks
+      if (typeof s.diff === 'string') {
+        s.diff = s.diff.replace(/\r\n/g, '\n');
+      }
       if (!['create','modify','delete'].includes(String(s.op||''))) return `step_${i}_bad_op`;
       if (typeof s.diff !== 'string' || !s.diff.startsWith('diff --git ')) return `step_${i}_bad_diff`;
       const size = Buffer.byteLength(s.diff,'utf8'); if (size > MAX_DIFF_BYTES) return `step_${i}_diff_too_large`;
@@ -660,7 +664,22 @@ async function handlePlan(req, res) {
       }
     }
 
-    // Validate strict envelope
+    // ---- NEW: detect JSON-escaped "\n" diffs RIGHT BEFORE VALIDATION
+    for (let i = 0; i < plan.steps.length; i++) {
+      const s = plan.steps[i];
+      if (s && s.type === 'patch' && typeof s.diff === 'string') {
+        const looksEscaped = s.diff.includes('\\n') && !s.diff.includes('\n');
+        if (looksEscaped) {
+          return sendJSON(res, 422, {
+            ok: false,
+            error: 'diff_likely_json_escaped',
+            hint: "Send raw diff bytes. With jq: jq -n --rawfile diff patch.diff '{diff:$diff, base_branch:\"public\"}'"
+          });
+        }
+      }
+    }
+
+    // Validate strict envelope (validatePlanEnvelope does CRLF->LF normalization per step)
     const verr = validatePlanEnvelope(plan);
     if (verr) return sendJSON(res, 422, { ok:false, error: verr, plan });
 
@@ -903,10 +922,27 @@ async function handleDiffDryRun(req, res) {
     if (err) return sendJSON(res, err.code === 413 ? 413 : 400, { ok:false, error: err.message || 'read_error' });
     try {
       const body  = JSON.parse(buf.toString('utf8') || '{}');
-      const diff  = String(body.diff || '');
+      let diff  = String(body.diff || '');
       const base  = String(body.base_branch || CANONICAL_BRANCH);
+
+      if (!diff.trim()) return sendJSON(res, 400, { ok:false, error:'empty_diff' });
+
+      // ---- NEW: helpful 422 if JSON-escaped "\n" but no real newlines
+      const looksEscaped = diff.includes('\\n') && !diff.includes('\n');
+      if (looksEscaped) {
+        return sendJSON(res, 422, {
+          ok: false,
+          error: 'diff_likely_json_escaped',
+          hint: "Send raw diff bytes. With jq: jq -n --rawfile diff patch.diff '{diff:$diff, base_branch:\"public\"}'"
+        });
+      }
+
+      // ---- NEW: Normalize CRLF -> LF BEFORE validation
+      diff = diff.replace(/\r\n/g, '\n');
+
       const sizeChk = enforceDiffSize(diff);
       if (!sizeChk.ok) return sendJSON(res, 413, { ok:false, error:sizeChk.msg });
+
       const pchk = stepPathsUnderRepo(diff); if (!pchk.ok) return sendJSON(res, 400, { ok:false, error:pchk.error });
       const out = await gitDryRun(diff, base);
       return sendJSON(res, out.ok ? 200 : 422, { ok: !!out.ok, result: out.ok ? 'ok' : 'fail', detail: out.error || null });
