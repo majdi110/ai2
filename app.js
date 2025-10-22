@@ -387,10 +387,20 @@ async function gitDryRun(diff, baseBranch=CANONICAL_BRANCH) {
     await execp('git', ['worktree', 'add', '--detach', '--force', tmpDir, `origin/${baseBranch}`], { cwd: repo });
     const patchPath = path.join(tmpDir, 'incoming.patch');
     await fsp.writeFile(patchPath, diff, 'utf8');
-    await execp('git', ['apply', '--check', '--3way', '--unsafe-paths', patchPath], { cwd: tmpDir });
-    return { ok:true };
-  } catch (e) {
-    return { ok:false, error: e.stderr || e.stdout || String(e) };
+
+    try {
+      // strict first
+      await execp('git', ['apply', '--check', '--3way', '--unsafe-paths', patchPath], { cwd: tmpDir });
+      return { ok: true };
+    } catch (e3) {
+      // fallback for brand-new files etc.
+      try {
+        await execp('git', ['apply', '--check', '--unsafe-paths', patchPath], { cwd: tmpDir });
+        return { ok: true, fallback: true };
+      } catch (e) {
+        return { ok: false, error: e.stderr || e.stdout || String(e) };
+      }
+    }
   } finally {
     try { await execp('git', ['worktree', 'remove', '--force', tmpDir], { cwd: repo }); } catch {}
   }
