@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<<<<<<< ours
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Hair Cut Salon</title>
@@ -37,10 +38,42 @@
             border-radius: 5px;
             cursor: pointer;
             font-size: 1rem;
+=======
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hair Cut Salon - Picture Preview</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            background: #f9f9f9;
+            max-width: 600px;
+            margin: auto;
+        }
+        h1 {
+            color: #333;
+        }
+        input[type="file"] {
+            margin-top: 20px;
+        }
+        .preview {
+            margin-top: 20px;
+            border: 1px solid #ddd;
+            padding: 10px;
+            background: #fff;
+            display: none;
+            text-align: center;
+        }
+        .preview img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 8px;
+>>>>>>> theirs
         }
     </style>
 </head>
 <body>
+<<<<<<< ours
     <header>
         <h1>Hair Cut Salon</h1>
     </header>
@@ -51,5 +84,32 @@
     <footer>
         &copy; 2024 Hair Cut Salon
     </footer>
+=======
+    <h1>Upload and Preview Picture</h1>
+    <input type="file" id="picInput" accept="image/*" />
+    <div class="preview" id="preview">
+        <p>No picture selected</p>
+    </div>
+
+    <script>
+        const input = document.getElementById('picInput');
+        const preview = document.getElementById('preview');
+
+        input.addEventListener('change', function() {
+            if (this.files && this.files[0]) {
+                const file = this.files[0];
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    preview.innerHTML = '<img src="' + e.target.result + '" alt="Preview">';
+                    preview.style.display = 'block';
+                };
+                reader.readAsDataURL(file);
+            } else {
+                preview.innerHTML = '<p>No picture selected</p>';
+                preview.style.display = 'none';
+            }
+        });
+    </script>
+>>>>>>> theirs
 </body>
 </html>
