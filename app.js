@@ -50,6 +50,14 @@ const MAX_DIFF_BYTES       = 200 * 1024;     // 200KB per diff
 const MAX_PLAN_BODY_BYTES  = 256 * 1024;     // /plan & dryrun payload cap
 const MAX_PROMPT_CHARS     = 16 * 1024;      // 16K prompt text cap
 
+// ---- NEW (GAP B): Project-scoped allowed path prefixes
+// Comma-separated via env ALLOWED_PATH_PREFIXES, defaults to public/users/
+const ALLOWED_PATH_PREFIXES =
+  (process.env.ALLOWED_PATH_PREFIXES || 'public/users/')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+
 // Dry-run public endpoint throttling + optional low-trust key
 const DRYRUN_RL_PER_MIN    = parseInt(process.env.DRYRUN_RL_PER_MIN || '10', 10);
 const DRYRUN_KEY           = process.env.DRYRUN_KEY || '';
@@ -166,7 +174,7 @@ function enforceDiffSize(diff) {
   return { ok:true };
 }
 
-// ---- NEW: CRLF normalization helper ----
+// ---- CRLF normalization helper ----
 function normalizeDiff(raw) {
   if (typeof raw !== 'string') return raw;
   // Convert CRLF → LF and remove stray carriage returns
@@ -254,7 +262,7 @@ const ipOf     = (req) => String(req.headers['x-forwarded-for'] || (req.socket &
 const safeJobBasename = (s) => String(s || '').replace(/[^A-Za-z0-9._-]/g, '');
 const ts       = () => {
   const d = new Date(), p = n => String(n).padStart(2,'0');
-  return `${d.getUTCFullYear()}-${p(d.getUTCMonth()+1)}-${p(d.getUTCDate())}T${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}Z`;
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth()+1)}-${p(d.getUTCDate())}T${p(d.getUTCHours())}${p(d.getUTCHours())}${p(d.getUTCSeconds())}Z`.replace('T', 'T');
 };
 function logDbg(obj) { try { fs.appendFileSync(DEBUG_LOG, JSON.stringify(obj) + '\n'); } catch (e) {} }
 
@@ -419,6 +427,9 @@ async function gitDryRun(diff, baseBranch=CANONICAL_BRANCH) {
 function stepPathsUnderRepo(diff) {
   const re = /^diff --git a\/([^\n]+) b\/([^\n]+)$/mg;
   let m; let n = 0;
+  const isDevNull = (p) => p === '/dev/null' || p === 'dev/null';
+  const pathAllowed = (rel) =>
+    ALLOWED_PATH_PREFIXES.length === 0 || ALLOWED_PATH_PREFIXES.some(p => rel.startsWith(p));
   while ((m = re.exec(diff)) !== null) {
     n++;
     const a = m[1], b = m[2];
@@ -426,10 +437,14 @@ function stepPathsUnderRepo(diff) {
     if (a.startsWith('/') || b.startsWith('/')) return { ok:false, error:'abs_path' };
     if (a.includes('..') || b.includes('..')) return { ok:false, error:'path_traversal' };
     if (a.includes('\\') || b.includes('\\')) return { ok:false, error:'backslash_path' };
+    // ---- enforce allowed prefixes (skip /dev/null sides)
+    if (!isDevNull(a) && !pathAllowed(a)) return { ok:false, error:'path_disallowed' };
+    if (!isDevNull(b) && !pathAllowed(b)) return { ok:false, error:'path_disallowed' };
   }
   if (n === 0) return { ok:false, error:'no_diff_pairs' };
   return { ok:true };
 }
+
 const ALLOWED_OPS = new Set(['create', 'modify', 'delete']);
 function inferStepOpFromDiff(diff) {
   if (/^new file mode /m.test(diff) || /--- \/dev\/null/m.test(diff)) return 'create';
@@ -585,7 +600,7 @@ function validatePlanEnvelope(plan) {
     const s = plan.steps[i];
     if (!isObj(s) || typeof s.type !== 'string') return `step_${i}_bad_type`;
     if (s.type === 'patch') {
-      // ---- NEW: Normalize CRLF -> LF BEFORE regex checks
+      // Normalize CRLF -> LF BEFORE regex checks
       if (typeof s.diff === 'string') {
         s.diff = normalizeDiff(s.diff);
       }
@@ -594,6 +609,9 @@ function validatePlanEnvelope(plan) {
       const size = Buffer.byteLength(s.diff,'utf8'); if (size > MAX_DIFF_BYTES) return `step_${i}_diff_too_large`;
       const pairsRe = /^diff --git a\/([^\n]+) b\/([^\n]+)$/mg;
       let m; let count=0;
+      const isDevNull = (p) => p === '/dev/null' || p === 'dev/null';
+      const pathAllowed = (rel) =>
+        ALLOWED_PATH_PREFIXES.length === 0 || ALLOWED_PATH_PREFIXES.some(p => rel.startsWith(p));
       while ((m = pairsRe.exec(s.diff)) !== null) {
         count++;
         const a=m[1], b=m[2];
@@ -601,6 +619,9 @@ function validatePlanEnvelope(plan) {
         if (a.startsWith('/') || b.startsWith('/')) return `step_${i}_abs_path`;
         if (a.includes('..') || b.includes('..')) return `step_${i}_path_traversal`;
         if (a.includes('\\') || b.includes('\\')) return `step_${i}_backslash_path`;
+        // ---- allowed prefixes
+        if (!isDevNull(a) && !pathAllowed(a)) return `step_${i}_path_disallowed`;
+        if (!isDevNull(b) && !pathAllowed(b)) return `step_${i}_path_disallowed`;
       }
       if (count===0) return `step_${i}_no_paths`;
       const autoOp = inferStepOpFromDiff(s.diff);
@@ -621,26 +642,65 @@ function buildCombinedDiff(steps) {
 }
 
 async function handlePlan(req, res) {
+  // --- SSE detection (Accept: text/event-stream or ?stream=1) ---
+  const parsedUrlForPlan = url.parse(req.url || '', true);
+  const wantsSSE = String(parsedUrlForPlan.query && parsedUrlForPlan.query.stream || '') === '1'
+                || String(req.headers['accept'] || '').toLowerCase().includes('text/event-stream');
+
+  // Helper to emit SSE events safely (no-op when not in SSE mode)
+  const sseEmit = (name, payload) => {
+    if (!wantsSSE) return;
+    try {
+      const line = JSON.stringify({ event: String(name || ''), ...payload });
+      res.write(`data: ${line}\n\n`);
+    } catch {}
+  };
+
+  // If streaming, set headers up front
+  if (wantsSSE) {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      // Allow proxies to flush early
+      'X-Accel-Buffering': 'no'
+    });
+    // Initial heartbeat to open the stream quickly
+    try { res.write(`data: ${JSON.stringify({ event: 'planning_started', ts: nowISO() })}\n\n`); } catch {}
+  }
+
   const ct = (req.headers['content-type'] || '').toLowerCase();
   if (!ct.includes('application/json')) return sendJSON(res, 415, { ok:false, error:'unsupported_media_type' });
 
   readBodyLimited(req, MAX_PLAN_BODY_BYTES, async (err, buf) => {
-    if (err) return sendJSON(res, err.code === 413 ? 413 : 400, { ok:false, error: err.message || 'read_error' });
+    if (err) {
+      if (wantsSSE) { sseEmit('final', { ok:false, error: err.message || 'read_error' }); try { return res.end(); } catch {} }
+      return sendJSON(res, err.code === 413 ? 413 : 400, { ok:false, error: err.message || 'read_error' });
+    }
 
     const bodyStr = buf.toString('utf8');
 
     // Phase 1: require idempotency
     const idem = String(req.headers['x-idempotency-key'] || '');
     const idemChk = checkIdempotencyOr409(idem, bodyStr);
-    if(!idemChk.ok){ return sendJSON(res, idemChk.code, { ok:false, error: idemChk.msg }); }
+    if(!idemChk.ok){
+      if (wantsSSE) { sseEmit('final', { ok:false, error: idemChk.msg }); try { return res.end(); } catch {} }
+      return sendJSON(res, idemChk.code, { ok:false, error: idemChk.msg });
+    }
 
     let body = {};
     try { body = JSON.parse(bodyStr || '{}'); }
-    catch (e) { return sendJSON(res, 400, { ok:false, error:'invalid_json' }); }
+    catch (e) {
+      if (wantsSSE) { sseEmit('final', { ok:false, error:'invalid_json' }); try { return res.end(); } catch {} }
+      return sendJSON(res, 400, { ok:false, error:'invalid_json' });
+    }
 
     const baseRaw = String(body.base_branch || CANONICAL_BRANCH);
     const br = enforceCanonicalBranch(baseRaw);
-    if(!br.ok) return sendJSON(res, br.code, { ok:false, error: br.msg });
+    if(!br.ok) {
+      if (wantsSSE) { sseEmit('final', { ok:false, error: br.msg }); try { return res.end(); } catch {} }
+      return sendJSON(res, br.code, { ok:false, error: br.msg });
+    }
 
     const previewOnly = Boolean(body.preview_only);
     const continueOnError = Boolean(body.continue_on_error);
@@ -653,9 +713,18 @@ async function handlePlan(req, res) {
     // Otherwise: prompt-driven planning via OpenAI
     if (!plan) {
       const prompt = String(body.prompt || '').trim();
-      if (!prompt) return sendJSON(res, 400, { ok:false, error:'prompt_required' });
-      if (prompt.length > MAX_PROMPT_CHARS) return sendJSON(res, 413, { ok:false, error:`prompt_too_long`, limit: MAX_PROMPT_CHARS });
-      if (!OPENAI_API_KEY) return sendJSON(res, 500, { ok:false, error:'missing_openai_key' });
+      if (!prompt) {
+        if (wantsSSE) { sseEmit('final', { ok:false, error:'prompt_required' }); try { return res.end(); } catch {} }
+        return sendJSON(res, 400, { ok:false, error:'prompt_required' });
+      }
+      if (prompt.length > MAX_PROMPT_CHARS) {
+        if (wantsSSE) { sseEmit('final', { ok:false, error:'prompt_too_long', limit: MAX_PROMPT_CHARS }); try { return res.end(); } catch {} }
+        return sendJSON(res, 413, { ok:false, error:`prompt_too_long`, limit: MAX_PROMPT_CHARS });
+      }
+      if (!OPENAI_API_KEY) {
+        if (wantsSSE) { sseEmit('final', { ok:false, error:'missing_openai_key' }); try { return res.end(); } catch {} }
+        return sendJSON(res, 500, { ok:false, error:'missing_openai_key' });
+      }
       try {
         const ai = await callOpenAIPlan(prompt);
         plan = normalizeIncomingPlan(
@@ -665,15 +734,25 @@ async function handlePlan(req, res) {
           br.branch,
           goalText
         );
-        if (!plan) return sendJSON(res, 422, { ok:false, error:'ai_bad_plan_shape', ai });
-      } catch (e) {
-        return sendJSON(res, 502, { ok:false, error: String(e && e.message || e) });
+        if (!plan) {
+          if (wantsSSE) { sseEmit('final', { ok:false, error:'ai_bad_plan_shape' }); try { return res.end(); } catch {} }
+          return sendJSON(res, 422, { ok:false, error:'ai_bad_plan_shape' });
+        }
+      } catch (e2) {
+        if (wantsSSE) { sseEmit('final', { ok:false, error: String(e2 && e2.message || e2) }); try { return res.end(); } catch {} }
+        return sendJSON(res, 502, { ok:false, error: String(e2 && e2.message || e2) });
       }
     }
 
-    // Validate strict envelope (includes per-step CRLF normalization)
+    // Validate strict envelope (includes per-step CRLF normalization and allowed-prefix checks)
     const verr = validatePlanEnvelope(plan);
-    if (verr) return sendJSON(res, 422, { ok:false, error: verr, plan });
+    if (verr) {
+      if (wantsSSE) { sseEmit('final', { ok:false, error: verr, plan: { id: plan.id, status:'failed' } }); try { return res.end(); } catch {} }
+      return sendJSON(res, 422, { ok:false, error: verr, plan });
+    }
+
+    // Emit validation success
+    sseEmit('validated', { ok:true, steps: plan.steps.length });
 
     // Combined diff (on demand)
     if (wantCombined) plan.combined_diff = buildCombinedDiff(plan.steps);
@@ -683,7 +762,12 @@ async function handlePlan(req, res) {
       plan.status = 'preview';
       plan.telemetry = { preview_only:true, ts: nowISO() };
       try { fs.writeFileSync(path.join(PLANS_DIR, `${plan.id}.json`), JSON.stringify(plan,null,2)); } catch(e){}
-      return sendJSON(res, 200, { ok:true, plan });
+      if (wantsSSE) {
+        sseEmit('final', { ok:true, status:'preview', plan: { id: plan.id, status: plan.status, steps: plan.steps.length } });
+        try { return res.end(); } catch {}
+      } else {
+        return sendJSON(res, 200, { ok:true, plan });
+      }
     }
 
     // Apply path: dry-run every patch and enqueue jobs
@@ -691,12 +775,15 @@ async function handlePlan(req, res) {
     for (let i=0;i<plan.steps.length;i++) {
       const s = plan.steps[i];
       try {
+        sseEmit('step_start', { i, type: s.type, op: s.op || null });
         if (s.type === 'patch') {
           const check = await gitDryRun(String(s.diff||''), br.branch);
           if (!check.ok) {
             stepResults.push({ i, type:'patch', ok:false, error:'dryrun_failed', detail:(check.error||'').slice(0,400) });
+            sseEmit('step_error', { i, error:'dryrun_failed', detail:(check.error||'').slice(0,200) });
             if (!continueOnError) { plan.status='failed'; break; } else { continue; }
           }
+          sseEmit('dryrun_ok', { i });
           const out = await enqueuePatchJob({
             base: br.branch,
             message: String(s.message || `Plan patch ${nowISO()}`),
@@ -705,6 +792,7 @@ async function handlePlan(req, res) {
             reqInfo: { from:'plan_endpoint', ip: ipOf(req), ua: String(req.headers['user-agent'] || '') }
           });
           stepResults.push({ i, type:'patch', ok:true, queued: out.queued, sha256: out.sha256 });
+          sseEmit('enqueued', { i, queued: out.queued });
         } else if (s.type === 'commands') {
           const out = enqueueCommandsJob({
             schema: 1,
@@ -714,9 +802,11 @@ async function handlePlan(req, res) {
             reqInfo: { from:'plan_endpoint', ip: ipOf(req), ua: String(req.headers['user-agent'] || '') }
           });
           stepResults.push({ i, type:'commands', ok:true, queued: out.queued });
+          sseEmit('enqueued', { i, queued: out.queued });
         }
-      } catch (e) {
-        stepResults.push({ i, ok:false, error:String(e && e.message || e).slice(0,400) });
+      } catch (e3) {
+        stepResults.push({ i, ok:false, error:String(e3 && e3.message || e3).slice(0,400) });
+        sseEmit('step_error', { i, error: String(e3 && e3.message || e3).slice(0,200) });
         if (!continueOnError) { plan.status='failed'; break; }
       }
     }
@@ -736,7 +826,16 @@ async function handlePlan(req, res) {
       }
     } catch(e){}
 
-    return sendJSON(res, 200, { ok:true, plan, stepResults });
+    if (wantsSSE) {
+      sseEmit('final', {
+        ok: plan.status === 'applied',
+        status: plan.status,
+        plan: { id: plan.id, status: plan.status, steps: plan.steps.length },
+      });
+      try { return res.end(); } catch {}
+    } else {
+      return sendJSON(res, 200, { ok:true, plan, stepResults });
+    }
   });
 }
 
@@ -919,13 +1018,14 @@ async function handleDiffDryRun(req, res) {
 
       if (!diff.trim()) return sendJSON(res, 400, { ok:false, error:'empty_diff' });
 
-      // ---- NEW: Normalize CRLF -> LF BEFORE any validation
+      // Normalize CRLF -> LF BEFORE any validation
       diff = normalizeDiff(diff);
 
       const sizeChk = enforceDiffSize(diff);
       if (!sizeChk.ok) return sendJSON(res, 413, { ok:false, error:sizeChk.msg });
 
       const pchk = stepPathsUnderRepo(diff); if (!pchk.ok) return sendJSON(res, 400, { ok:false, error:pchk.error });
+
       const out = await gitDryRun(diff, base);
       return sendJSON(res, out.ok ? 200 : 422, { ok: !!out.ok, result: out.ok ? 'ok' : 'fail', detail: out.error || null });
     } catch (e) {
@@ -1232,4 +1332,3 @@ const PORT = parseInt(process.env.PORT || '3005', 10);
 http.createServer(route).listen(PORT, () => {
   console.log(`[ai2] listening on :${PORT}`);
 });
-// touch Thu Oct 23 02:07:37 CDT 2025
