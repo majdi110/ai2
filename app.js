@@ -9,6 +9,7 @@
  *   GET/HEAD  /ai2/health           -> alias of /ai2/_health
  *   GET/HEAD  /ai2/version          -> { ok:true, version }
  *   GET/HEAD  /ai2/_config          -> quick config echo
+ *   GET/HEAD  /ai2/_openai_check    -> quick OpenAI key/model/latency check
  *   GET/HEAD  /ai2/static/<file>    -> serve ./public/<file> (safe types)
  *   GET       /ai2/debug            -> debug info (node version, env)
  *   POST      /ai2/echo             -> debug echo; shows headers/body + decoded preview
@@ -233,9 +234,9 @@ const LIST_MAX_DEPTH = 3;
 const LIST_MAX_ITEMS = 2000;
 const HIDE_NAMES     = new Set(['.git', 'node_modules', '.env']);
 
-// OpenAI
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-const OPENAI_MODEL   = process.env.OPENAI_MODEL   || 'gpt-4.1-mini';
+// OpenAI model (key is loaded lazily via getOpenAIKey())
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || ''; // kept for compatibility; not relied upon
+const OPENAI_MODEL   = process.env.OPENAI_MODEL   || 'gpt-4o-mini';
 
 // ----- init -----
 for (const d of [QUEUE_DIR, DONE_DIR, FAIL_DIR, LOG_DIR, PLANS_DIR]) {
@@ -255,6 +256,20 @@ function getActionToken() {
     console.error(`[ai2] WARN: failed to read ACTION_TOKEN from ${TOKEN_FILE}: ${e.message}`);
   }
   return ACTION_TOKEN;
+}
+
+// Lazily load OPENAI_API_KEY (prefer file, fallback to env)
+let OPENAI_KEY_CACHE = '';
+const OPENAI_KEY_FILE = '/home/genweb/agent/OPENAI_API_KEY';
+function getOpenAIKey() {
+  if (OPENAI_KEY_CACHE) return OPENAI_KEY_CACHE;
+  try {
+    OPENAI_KEY_CACHE = String(fs.readFileSync(OPENAI_KEY_FILE, 'utf8') || '').trim();
+    if (!OPENAI_KEY_CACHE) throw new Error('empty');
+  } catch {
+    OPENAI_KEY_CACHE = (process.env.OPENAI_API_KEY || '').trim();
+  }
+  return OPENAI_KEY_CACHE;
 }
 
 // ----- helpers -----
@@ -289,6 +304,7 @@ function httpsJson({ hostname, path, method='POST', headers={}, bodyObj }) {
       res.on('end', () => {
         const raw = Buffer.concat(chunks).toString('utf8');
         if (res.statusCode < 200 || res.statusCode >= 300) {
+          // Include status + snippet for easier SSE debugging
           return reject(new Error(`HTTPS ${res.statusCode}: ${raw.slice(0,400)}`));
         }
         try {
@@ -303,6 +319,27 @@ function httpsJson({ hostname, path, method='POST', headers={}, bodyObj }) {
     req.write(data);
     req.end();
   });
+}
+
+// Light retry wrapper for OpenAI Responses (handles 429/5xx briefly)
+async function openaiWithRetry(bodyObj, tries=3) {
+  let lastErr;
+  for (let i=0;i<tries;i++){
+    try {
+      return await httpsJson({
+        hostname: 'api.openai.com',
+        path: '/v1/responses',
+        headers: { 'Authorization': `Bearer ${getOpenAIKey()}` },
+        bodyObj
+      });
+    } catch (e) {
+      lastErr = e;
+      const msg = String(e.message || '');
+      if (!/HTTPS (429|5\d\d)/.test(msg)) break;
+      await new Promise(r => setTimeout(r, 300 * Math.pow(2,i)));
+    }
+  }
+  throw lastErr;
 }
 
 // read entire request body with a specific max cap
@@ -491,8 +528,12 @@ function validateCommandsSteps(steps) {
 
 /* -------------------- OpenAI plan support -------------------- */
 function buildPlannerSystemPrompt() {
+  const ROOT = "/home/genweb/public_html/datav.belocloud.com/ai2";
   return [
-    'You are an automation planner for my repo. Return STRICT JSON (no prose) that follows this schema exactly:',
+    // ===== Objective =====
+    'You are a repository automation planner. Emit STRICT JSON only (no prose), matching the schema below.',
+    '',
+    // ===== Schema =====
     '{',
     '  "schema": 1,',
     '  "id": "<string unique id>",',
@@ -501,31 +542,73 @@ function buildPlannerSystemPrompt() {
     '  "constraints": {',
     '    "base_branch": "public",',
     '    "allowed_ops": ["create","modify","delete"],',
-    '    "root_dir": "/home/genweb/public_html/datav.belocloud.com/ai2"',
+    `    "root_dir": "${ROOT}"`,
     '  },',
     '  "steps": [',
-    '    {',
-    '      "type":"patch",',
-    '      "op":"create|modify|delete",',
-    '      "base_branch":"public",',
-    '      "message":"<git commit message>",',
-    '      "diff":"<unified diff starting with diff --git ...>"',
-    '    },',
-    '    { "type":"commands", "schema":1, "workdir":"/home/genweb/public_html/datav.belocloud.com/ai2", "steps":["..."] }',
+    '    { "type":"patch", "op":"create|modify|delete", "base_branch":"public", "message":"<git commit message>", "diff":"<unified diff starting with diff --git ...>" },',
+    '    { "type":"commands", "schema":1, "workdir":"'+ROOT+'", "steps":["..."] }',
     '  ],',
     '  "combined_diff": null,',
     '  "artifacts": null,',
     '  "telemetry": null',
     '}',
+    '',
+    // ===== Hard rules (security & quality) =====
     'Rules:',
-    '- All file paths must be under /home/genweb/public_html/datav.belocloud.com/ai2 (use relative paths like public/..., app files at repo root).',
+    `- All file paths MUST be under ${ROOT} and obey the server allowed prefixes. Use relative paths like public/...`,
     "- Unified diffs MUST start with 'diff --git ' and be valid git-format patches.",
-    '- Prefer a SINGLE patch step when possible. Keep diffs < 200 KB.',
-    '- Only touch paths allowed by the server (ALLOWED_PATH_PREFIXES).',
-    '- Do NOT include binary blobs or large base64. Text only; small base64 only if essential and tiny.',
-    '- When editing an existing file, keep the diff minimal (only changed lines).',
-    '- Use type:"commands" only for simple build/test tasks (e.g., npm ci, npm run build).',
-    '- No markdown or comments outside the JSON.'
+    '- Prefer a SINGLE patch step when possible.',
+    '- Keep total diff size < 200 KB; do not include large blocks.',
+    '- NEVER write outside allowed prefixes. If a requested path is disallowed, adjust the plan to allowed locations only.',
+    '- Do NOT include binary content. No images/binaries or large base64. Text only; tiny base64 only if absolutely necessary.',
+    '- When modifying existing files, keep diffs minimal: only the changed lines plus strict context.',
+    '- Use a commands step ONLY for small, safe repo tasks (e.g., npm ci, npm run build, simple git ops) and only allowed binaries.',
+    '- Output must be pure JSON, no markdown, no comments.',
+    '',
+    // ===== Framework/boilerplate snippets the model can reuse =====
+    'Templates:',
+    'HTML_MINIMAL := "<!doctype html>\\n<html lang=\\"en\\">\\n<head>\\n  <meta charset=\\"utf-8\\">\\n  <title>${TITLE}</title>\\n</head>\\n<body>\\n  <h1>${H1}</h1>\\n</body>\\n</html>\\n"',
+    '',
+    // ===== Few-shot examples =====
+    'Examples:',
+    // create
+    'EXAMPLE_CREATE:',
+    '{',
+    '  "schema":1,',
+    '  "id":"ex-create-1",',
+    '  "status":"planned",',
+    '  "goal":"Create a welcome page",',
+    '  "constraints":{"base_branch":"public","allowed_ops":["create","modify","delete"],"root_dir":"'+ROOT+'"},',
+    '  "steps":[{',
+    '    "type":"patch","op":"create","base_branch":"public","message":"Add welcome page",',
+    '    "diff":"diff --git a/public/welcome.html b/public/welcome.html\\nnew file mode 100644\\nindex 0000000..e69de29\\n--- /dev/null\\n+++ b/public/welcome.html\\n@@ -0,0 +1,5 @@\\n+<!doctype html>\\n+<title>Welcome</title>\\n+<h1>Welcome</h1>\\n+<p>Hello!</p>\\n+"',
+    '  }],',
+    '  "combined_diff":null,"artifacts":null,"telemetry":null',
+    '}',
+    '',
+    // modify
+    'EXAMPLE_MODIFY:',
+    '{',
+    '  "schema":1,"id":"ex-mod-1","status":"planned","goal":"Update title in index.html",',
+    '  "constraints":{"base_branch":"public","allowed_ops":["create","modify","delete"],"root_dir":"'+ROOT+'"},',
+    '  "steps":[{',
+    '    "type":"patch","op":"modify","base_branch":"public","message":"Change title to AI2 Demo",',
+    '    "diff":"diff --git a/public/index.html b/public/index.html\\nindex abc1234..def5678 100644\\n--- a/public/index.html\\n+++ b/public/index.html\\n@@ -1,5 +1,5 @@\\n <!doctype html>\\n <meta charset=\\"utf-8\\">\\n-<title>Old</title>\\n+<title>AI2 Demo</title>\\n <h1>Hello</h1>\\n"',
+    '  }],',
+    '  "combined_diff":null,"artifacts":null,"telemetry":null',
+    '}',
+    '',
+    // delete
+    'EXAMPLE_DELETE:',
+    '{',
+    '  "schema":1,"id":"ex-del-1","status":"planned","goal":"Remove deprecated file",',
+    '  "constraints":{"base_branch":"public","allowed_ops":["create","modify","delete"],"root_dir":"'+ROOT+'"},',
+    '  "steps":[{',
+    '    "type":"patch","op":"delete","base_branch":"public","message":"Remove old file",',
+    '    "diff":"diff --git a/public/old.txt b/public/old.txt\\ndeleted file mode 100644\\nindex 1a2b3c4..0000000\\n--- a/public/old.txt\\n+++ /dev/null\\n@@ -1,1 +0,0 @@\\n-legacy content\\n"',
+    '  }],',
+    '  "combined_diff":null,"artifacts":null,"telemetry":null',
+    '}',
   ].join('\n');
 }
 
@@ -535,7 +618,7 @@ function injectContextIntoPrompt(userText, contextBlock) {
 }
 
 async function callOpenAIPlan(userPrompt) {
-  if (!OPENAI_API_KEY) throw new Error('missing_openai_key');
+  if (!getOpenAIKey()) throw new Error('missing_openai_key');
 
   const system = buildPlannerSystemPrompt();
   // OpenAI Responses API — JSON output via text.format
@@ -548,12 +631,7 @@ async function callOpenAIPlan(userPrompt) {
     text: { format: { type: "json_object" } }
   };
 
-  const j = await httpsJson({
-    hostname: 'api.openai.com',
-    path: '/v1/responses',
-    headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}` },
-    bodyObj: body
-  });
+  const j = await openaiWithRetry(body);
 
   const txt =
     j.output_text ||
@@ -702,7 +780,8 @@ function handleConfig(req, res) {
     repo_root: REPO_ROOT,
     branch: CANONICAL_BRANCH,
     allowed_prefixes: ALLOWED_PATH_PREFIXES,
-    node: process.version
+    node: process.version,
+    model: OPENAI_MODEL
   });
 }
 
@@ -714,6 +793,25 @@ function handlePlansRead(req, res) {
   const fp = path.join(PLANS_DIR, `${safe}.json`);
   try { return sendJSON(res, 200, JSON.parse(fs.readFileSync(fp,'utf8'))); }
   catch { return sendJSON(res, 404, { ok:false, error:'not_found' }); }
+}
+
+/* -------------------- OpenAI health check -------------------- */
+async function handleOpenAICheck(req, res) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') { res.statusCode = 405; return res.end(); }
+  const key = getOpenAIKey();
+  if (!key) return sendJSON(res, 200, { ok:false, error:'missing_openai_key' });
+  try {
+    const t0 = Date.now();
+    await httpsJson({
+      hostname: 'api.openai.com',
+      path: '/v1/models',
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${key}` }
+    });
+    return sendJSON(res, 200, { ok:true, model: OPENAI_MODEL, latency_ms: Date.now()-t0 });
+  } catch (e) {
+    return sendJSON(res, 200, { ok:false, model: OPENAI_MODEL, error: String(e).slice(0,200) });
+  }
 }
 
 /* -------------------- /plan handler -------------------- */
@@ -830,7 +928,7 @@ async function handlePlan(req, res) {
         if (wantsSSE) { sseEmit('final', { ok:false, error:'prompt_too_long', limit: MAX_PROMPT_CHARS }); try { return res.end(); } catch {} }
         return sendJSON(res, 413, { ok:false, error:`prompt_too_long`, limit: MAX_PROMPT_CHARS });
       }
-      if (!OPENAI_API_KEY) {
+      if (!getOpenAIKey()) {
         if (wantsSSE) { sseEmit('final', { ok:false, error:'missing_openai_key' }); try { return res.end(); } catch {} }
         return sendJSON(res, 500, { ok:false, error:'missing_openai_key' });
       }
@@ -1392,6 +1490,10 @@ function route(req, res) {
   if (isRoute(req, pathname, ['GET','HEAD'], '/ai2/_config') || isRoute(req, pathname, ['GET','HEAD'], '/_config'))
     return handleConfig(req, res);
 
+  // OpenAI check
+  if (isRoute(req, pathname, ['GET','HEAD'], '/ai2/_openai_check'))
+    return handleOpenAICheck(req, res);
+
   // root banner
   if (isRoute(req, pathname, ['GET','HEAD'], '/ai2') || isRoute(req, pathname, ['GET','HEAD'], '/'))
     return handleRoot(req, res);
@@ -1459,4 +1561,5 @@ function route(req, res) {
 const PORT = parseInt(process.env.PORT || '3005', 10);
 http.createServer(route).listen(PORT, () => {
   console.log(`[ai2] listening on :${PORT}`);
+  console.log(`[ai2] planner model: ${OPENAI_MODEL}`);
 });
