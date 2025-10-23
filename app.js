@@ -1,5 +1,4 @@
 'use strict';
-// noop: plan test 2025-10-23T18:03:07Z
 
 /**
  * BeloCloud Actions mini-server (no external deps).
@@ -9,6 +8,7 @@
  *   GET/HEAD  /ai2/_health          -> { ok:true, time }
  *   GET/HEAD  /ai2/health           -> alias of /ai2/_health
  *   GET/HEAD  /ai2/version          -> { ok:true, version }
+ *   GET/HEAD  /ai2/_config          -> quick config echo
  *   GET/HEAD  /ai2/static/<file>    -> serve ./public/<file> (safe types)
  *   GET       /ai2/debug            -> debug info (node version, env)
  *   POST      /ai2/echo             -> debug echo; shows headers/body + decoded preview
@@ -51,8 +51,7 @@ const MAX_DIFF_BYTES       = 200 * 1024;     // 200KB per diff
 const MAX_PLAN_BODY_BYTES  = 256 * 1024;     // /plan & dryrun payload cap
 const MAX_PROMPT_CHARS     = 16 * 1024;      // 16K prompt text cap
 
-// ---- NEW (GAP B): Project-scoped allowed path prefixes
-// Comma-separated via env ALLOWED_PATH_PREFIXES, defaults to public/users/
+// ---- Project-scoped allowed path prefixes (env: ALLOWED_PATH_PREFIXES; default public/users/)
 const ALLOWED_PATH_PREFIXES =
   (process.env.ALLOWED_PATH_PREFIXES || 'public/users/')
     .split(',')
@@ -223,7 +222,7 @@ const LOG_DIR     = '/home/genweb/agent/logs';
 const IDEM_DIR    = QUEUE_DIR; // legacy idempotency markers alongside jobs (kept for queue dedupe)
 const DEBUG_LOG   = '/home/genweb/agent/last_action_debug.log';
 
-// Plans persistence (Phase 3)
+// Plans persistence
 const PLANS_DIR    = '/home/genweb/agent/work/plans';
 
 const MAX_BYTES    = 512 * 1024; // generic read cap
@@ -260,10 +259,12 @@ function getActionToken() {
 
 // ----- helpers -----
 const ipOf     = (req) => String(req.headers['x-forwarded-for'] || (req.socket && req.socket.remoteAddress) || '');
+// Timestamp (UTC) YYYY-MM-DDTHHMMSSZ  ✅ bugfix
 const safeJobBasename = (s) => String(s || '').replace(/[^A-Za-z0-9._-]/g, '');
 const ts       = () => {
   const d = new Date(), p = n => String(n).padStart(2,'0');
-  return `${d.getUTCFullYear()}-${p(d.getUTCMonth()+1)}-${p(d.getUTCDate())}T${p(d.getUTCHours())}${p(d.getUTCHours())}${p(d.getUTCSeconds())}Z`.replace('T', 'T');
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth()+1)}-${p(d.getUTCDate())}` +
+         `T${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}Z`;
 };
 function logDbg(obj) { try { fs.appendFileSync(DEBUG_LOG, JSON.stringify(obj) + '\n'); } catch (e) {} }
 
@@ -424,7 +425,7 @@ async function gitDryRun(diff, baseBranch=CANONICAL_BRANCH) {
 
 /* ---------------- Phase 3: path safety + plan helpers ---------------- */
 
-// simple path checks for "under repo root" from diffs
+// simple path checks for "under repo root" from diffs (+ allowed prefixes)
 function stepPathsUnderRepo(diff) {
   const re = /^diff --git a\/([^\n]+) b\/([^\n]+)$/mg;
   let m; let n = 0;
@@ -438,7 +439,6 @@ function stepPathsUnderRepo(diff) {
     if (a.startsWith('/') || b.startsWith('/')) return { ok:false, error:'abs_path' };
     if (a.includes('..') || b.includes('..')) return { ok:false, error:'path_traversal' };
     if (a.includes('\\') || b.includes('\\')) return { ok:false, error:'backslash_path' };
-    // ---- enforce allowed prefixes (skip /dev/null sides)
     if (!isDevNull(a) && !pathAllowed(a)) return { ok:false, error:'path_disallowed' };
     if (!isDevNull(b) && !pathAllowed(b)) return { ok:false, error:'path_disallowed' };
   }
@@ -462,6 +462,33 @@ function buildCombinedDiffFromSteps(steps) {
   return parts.length ? parts.join('\n\n') + '\n' : '';
 }
 
+/* -------------------- Commands-step safety (GAP G) -------------------- */
+const CMD_ALLOWLIST = new Set([
+  'node','npm','npx','pnpm','yarn',
+  'git','bash','sh',
+  'curl','echo','printf','sed','awk','grep','find','tee','cat'
+]);
+const MAX_CMD_STEPS = 5;
+const MAX_CMD_LEN   = 200;
+
+function parseFirstWord(s) {
+  const m = String(s || '').trim().match(/^([^\s]+)/);
+  return m ? m[1] : '';
+}
+function validateCommandsSteps(steps) {
+  if (!Array.isArray(steps) || steps.length === 0) return 'empty_steps';
+  if (steps.length > MAX_CMD_STEPS) return 'too_many_steps';
+  for (let i=0;i<steps.length;i++) {
+    const line = String(steps[i] || '');
+    if (!line.trim()) return `step_${i}_empty`;
+    if (line.length > MAX_CMD_LEN) return `step_${i}_too_long`;
+    const bin = parseFirstWord(line);
+    if (!CMD_ALLOWLIST.has(bin)) return `step_${i}_bin_not_allowed:${bin}`;
+    if (/[;&|]{2,}/.test(line)) return `step_${i}_suspicious_operators`;
+  }
+  return null;
+}
+
 /* -------------------- OpenAI plan support -------------------- */
 function buildPlannerSystemPrompt() {
   return [
@@ -483,8 +510,7 @@ function buildPlannerSystemPrompt() {
     '      "base_branch":"public",',
     '      "message":"<git commit message>",',
     '      "diff":"<unified diff starting with diff --git ...>"',
-    '    }',
-    '    // or',
+    '    },',
     '    { "type":"commands", "schema":1, "workdir":"/home/genweb/public_html/datav.belocloud.com/ai2", "steps":["..."] }',
     '  ],',
     '  "combined_diff": null,',
@@ -494,9 +520,18 @@ function buildPlannerSystemPrompt() {
     'Rules:',
     '- All file paths must be under /home/genweb/public_html/datav.belocloud.com/ai2 (use relative paths like public/..., app files at repo root).',
     "- Unified diffs MUST start with 'diff --git ' and be valid git-format patches.",
-    '- Prefer a single patch step when possible. Keep diffs < 200 KB.',
-    '- No markdown or comments outside the JSON.',
+    '- Prefer a SINGLE patch step when possible. Keep diffs < 200 KB.',
+    '- Only touch paths allowed by the server (ALLOWED_PATH_PREFIXES).',
+    '- Do NOT include binary blobs or large base64. Text only; small base64 only if essential and tiny.',
+    '- When editing an existing file, keep the diff minimal (only changed lines).',
+    '- Use type:"commands" only for simple build/test tasks (e.g., npm ci, npm run build).',
+    '- No markdown or comments outside the JSON.'
   ].join('\n');
+}
+
+// Helper to prepend file-context into the user prompt (GAP H)
+function injectContextIntoPrompt(userText, contextBlock) {
+  return contextBlock ? (`[CONTEXT FOLLOWS]\n${contextBlock}\n\n[REQUEST]\n${userText}`) : userText;
 }
 
 async function callOpenAIPlan(userPrompt) {
@@ -522,9 +557,10 @@ async function callOpenAIPlan(userPrompt) {
 
   const txt =
     j.output_text ||
-    (j.output && j.output[0] && j.output[0].content && j.output[0].content[0] && j.output[0].text) ||
-    (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) ||
-    '';
+    (j.output?.[0]?.content?.[0]?.text) ||
+    (Array.isArray(j.output) && j.output.map(o => o?.content?.[0]?.text).filter(Boolean).join('\n')) ||
+    (j.choices?.[0]?.message?.content) ||
+    (typeof j === 'string' ? j : '');
 
   if (!txt) throw new Error('openai_no_output');
 
@@ -620,7 +656,6 @@ function validatePlanEnvelope(plan) {
         if (a.startsWith('/') || b.startsWith('/')) return `step_${i}_abs_path`;
         if (a.includes('..') || b.includes('..')) return `step_${i}_path_traversal`;
         if (a.includes('\\') || b.includes('\\')) return `step_${i}_backslash_path`;
-        // ---- allowed prefixes
         if (!isDevNull(a) && !pathAllowed(a)) return `step_${i}_path_disallowed`;
         if (!isDevNull(b) && !pathAllowed(b)) return `step_${i}_path_disallowed`;
       }
@@ -629,6 +664,8 @@ function validatePlanEnvelope(plan) {
       if (autoOp !== s.op) return `step_${i}_op_mismatch`;
     } else if (s.type === 'commands') {
       if ((s.schema|0) !== 1 || !Array.isArray(s.steps) || s.steps.length === 0) return `step_${i}_bad_commands`;
+      const vErr = validateCommandsSteps(s.steps);
+      if (vErr) return `step_${i}_commands_invalid:${vErr}`;
     } else {
       return `step_${i}_unknown_type`;
     }
@@ -642,11 +679,63 @@ function buildCombinedDiff(steps) {
   return parts.length ? (parts.join('\n') + '\n') : null;
 }
 
+/* -------------------- Plans history (auth) -------------------- */
+function handlePlansList(req, res) {
+  if (!authOk(req)) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
+  const limit = Math.max(1, Math.min(200, parseInt((new URL(req.url,'http://x')).searchParams.get('limit')||'50',10)));
+  let files = [];
+  try {
+    files = fs.readdirSync(PLANS_DIR)
+      .filter(f => f.endsWith('.json'))
+      .map(f => ({ file:f, mtime: Math.floor(fs.statSync(path.join(PLANS_DIR,f)).mtimeMs/1000) }))
+      .sort((a,b)=>b.mtime-a.mtime).slice(0,limit);
+  } catch {}
+  return sendJSON(res, 200, { ok:true, items: files });
+}
+
+// Quick config echo for sanity checks
+function handleConfig(req, res) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') { res.statusCode = 405; return res.end(); }
+  return sendJSON(res, 200, {
+    ok: true,
+    port: PORT,
+    repo_root: REPO_ROOT,
+    branch: CANONICAL_BRANCH,
+    allowed_prefixes: ALLOWED_PATH_PREFIXES,
+    node: process.version
+  });
+}
+
+function handlePlansRead(req, res) {
+  if (!authOk(req)) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
+  const id = (new URL(req.url,'http://x')).searchParams.get('id') || '';
+  const safe = String(id).replace(/[^A-Za-z0-9._-]/g,'');
+  if (!safe) return sendJSON(res, 400, { ok:false, error:'bad_id' });
+  const fp = path.join(PLANS_DIR, `${safe}.json`);
+  try { return sendJSON(res, 200, JSON.parse(fs.readFileSync(fp,'utf8'))); }
+  catch { return sendJSON(res, 404, { ok:false, error:'not_found' }); }
+}
+
+/* -------------------- /plan handler -------------------- */
 async function handlePlan(req, res) {
+  // optional per-env auth requirement (defaults ON)
+  const REQUIRE_PLAN_AUTH = (process.env.PLAN_AUTH_REQUIRED || '1') !== '0';
+  if (REQUIRE_PLAN_AUTH && !authOk(req)) {
+    return sendJSON(res, 401, { ok:false, error:'unauthorized' });
+  }
+
+  const ip = ipOf(req);
+  const rl = rlCheck(ip, 'plan', 30); // 30/min per IP (tune)
+  if (!rl.ok) return sendJSON(res, 429, { ok:false, error:'rate_limited', retry_after: RL_RETRY_AFTER_SEC });
+
   // --- SSE detection (Accept: text/event-stream or ?stream=1) ---
   const parsedUrlForPlan = url.parse(req.url || '', true);
   const wantsSSE = String(parsedUrlForPlan.query && parsedUrlForPlan.query.stream || '') === '1'
                 || String(req.headers['accept'] || '').toLowerCase().includes('text/event-stream');
+  // optional file list via query (?include_files=path&include_files=other)
+  const includeFiles = Array.isArray(parsedUrlForPlan.query && parsedUrlForPlan.query.include_files)
+    ? parsedUrlForPlan.query.include_files
+    : (parsedUrlForPlan.query && parsedUrlForPlan.query.include_files ? [parsedUrlForPlan.query.include_files] : null);
 
   // Helper to emit SSE events safely (no-op when not in SSE mode)
   const sseEmit = (name, payload) => {
@@ -663,10 +752,8 @@ async function handlePlan(req, res) {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',
       'Connection': 'keep-alive',
-      // Allow proxies to flush early
       'X-Accel-Buffering': 'no'
     });
-    // Initial heartbeat to open the stream quickly
     try { res.write(`data: ${JSON.stringify({ event: 'planning_started', ts: nowISO() })}\n\n`); } catch {}
   }
 
@@ -707,6 +794,27 @@ async function handlePlan(req, res) {
     const continueOnError = Boolean(body.continue_on_error);
     const wantCombined = Boolean(body.return_combined_diff);
     const goalText = String(body.goal || body.prompt || '').slice(0, 200);
+    const wantContextFiles = Array.isArray(body.include_files) ? body.include_files : (includeFiles || null);
+
+    // (Optional) pull file context for the planner (GAP H)
+    let contextBlock = '';
+    if (wantContextFiles && wantContextFiles.length) {
+      let total = 0;
+      const MAX_CTX = 200 * 1024; // 200KB
+      const uniq = [...new Set(wantContextFiles.map(String))].slice(0, 12);
+      for (const rel of uniq) {
+        try {
+          const full = safeJoin(REPO_ROOT, rel);
+          const data = fs.readFileSync(full, 'utf8');
+          const slice = data.slice(0, Math.max(0, MAX_CTX - total));
+          if (slice) {
+            contextBlock += `\n\n--- ${rel} ---\n${slice}`;
+            total += Buffer.byteLength(slice, 'utf8');
+          }
+          if (total >= MAX_CTX) break;
+        } catch {}
+      }
+    }
 
     // If caller supplied steps (strict or legacy), use them and DO NOT require OpenAI.
     let plan = normalizeIncomingPlan(body, br.branch, goalText);
@@ -727,7 +835,8 @@ async function handlePlan(req, res) {
         return sendJSON(res, 500, { ok:false, error:'missing_openai_key' });
       }
       try {
-        const ai = await callOpenAIPlan(prompt);
+        const effPrompt = injectContextIntoPrompt(prompt, contextBlock);
+        const ai = await callOpenAIPlan(effPrompt);
         plan = normalizeIncomingPlan(
           isObj(ai) && Array.isArray(ai.steps) ? { steps: ai.steps, preview_only: previewOnly, goal: goalText } :
           isObj(ai) && Array.isArray(ai.plan)  ? { plan:  ai.plan,  preview_only: previewOnly, goal: goalText } :
@@ -795,6 +904,13 @@ async function handlePlan(req, res) {
           stepResults.push({ i, type:'patch', ok:true, queued: out.queued, sha256: out.sha256 });
           sseEmit('enqueued', { i, queued: out.queued });
         } else if (s.type === 'commands') {
+          const vErr = validateCommandsSteps(s.steps);
+          if (vErr) {
+            stepResults.push({ i, type:'commands', ok:false, error:vErr });
+            sseEmit('step_error', { i, error: vErr });
+            if (!continueOnError) { plan.status='failed'; break; } else { continue; }
+          }
+
           const out = enqueueCommandsJob({
             schema: 1,
             steps: (Array.isArray(s.steps)? s.steps.map(String):[]),
@@ -929,6 +1045,9 @@ async function handleJobSubmit(req, res) {
       const schema  = (body.schema|0) || 1;
       const steps   = Array.isArray(body.steps) ? body.steps : [];
       const workdir = String(body.workdir || REPO_ROOT);
+
+      const vErr = validateCommandsSteps(steps);
+      if (vErr) return sendJSON(res, 400, { ok:false, error:`commands_validation:${vErr}` });
 
       const idemHeader = String(req.headers['x-idempotency-key'] || '');
       const idemBody   = String(body.idempotency_key || '');
@@ -1269,6 +1388,10 @@ function route(req, res) {
   if (isRoute(req, pathname, ['GET','HEAD'], '/ai2/version') || isRoute(req, pathname, ['GET','HEAD'], '/version'))
     return handleVersion(req, res);
 
+  // config
+  if (isRoute(req, pathname, ['GET','HEAD'], '/ai2/_config') || isRoute(req, pathname, ['GET','HEAD'], '/_config'))
+    return handleConfig(req, res);
+
   // root banner
   if (isRoute(req, pathname, ['GET','HEAD'], '/ai2') || isRoute(req, pathname, ['GET','HEAD'], '/'))
     return handleRoot(req, res);
@@ -1290,6 +1413,10 @@ function route(req, res) {
   // Planner
   if (isRoute(req, pathname, 'POST', '/ai2/plan') || isRoute(req, pathname, 'POST', '/plan'))
     return handlePlan(req, res);
+
+  // Plans history (auth)
+  if (isRoute(req, pathname, ['GET'], '/ai2/plans/list')) return handlePlansList(req,res);
+  if (isRoute(req, pathname, ['GET'], '/ai2/plans/read')) return handlePlansRead(req,res);
 
   // Modern repo endpoints (auth) — allow GET or POST
   if (isRoute(req, pathname, ['GET','POST'], '/ai2/repo/ls') || isRoute(req, pathname, ['GET','POST'], '/repo/ls'))
