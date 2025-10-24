@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>AI2 Demo</title>
+  <!-- ai2 smoke test -->
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; }
+    h1 { margin: 0 0 12px; }
+    .row { margin: 12px 0; }
+    textarea, input[type="text"], input[type="password"] { width: 100%; max-width: 100%; box-sizing: border-box; }
+    button { cursor: pointer; }
+    pre#ai2-diff { background:#111; color:#eee; padding:10px; overflow:auto; max-height:320px; }
+    ul { padding-left: 18px; }
+  </style>
+</head>
+<body>
+  <h1>AI2 Demo</h1>
+
+  <div class="row">
+    <label>Token:
+      <input id="ai2-token" type="password" placeholder="paste ACTION_TOKEN">
+    </label>
+  </div>
+
+  <div class="row">
+    <input id="ai2-prompt" type="text"
+           value="Change &lt;title&gt; in public/index.html to AI2 Demo."
+           placeholder="Enter a plan prompt…" />
+    <div style="margin-top:8px;">
+      <button id="ai2-plan-btn">Plan (preview)</button>
+      <button id="ai2-apply-btn" style="margin-left:.5rem;">Apply (with fallback)</button>
+    </div>
+  </div>
+
+  <div class="row">
+    <h3 style="margin: 12px 0 6px;">Fallback (optional)</h3>
+    <p style="margin:0 0 .5rem 0;">One shell command per line (allowed binaries only). Used if planning yields no steps.</p>
+    <textarea id="ai2-fallback" rows="4" placeholder="echo ok > public/fallback-ui.txt
+bash -lc 'git add public/fallback-ui.txt; git commit -m &quot;ui-fb&quot;; git push origin public'"></textarea>
+  </div>
+
+  <div class="row">
+    <h3 style="margin: 12px 0 6px;">SSE events</h3>
+    <textarea id="ai2-events" rows="10" placeholder="SSE events appear here…"></textarea>
+  </div>
+
+  <div class="row">
+    <h3>Combined diff (last preview)</h3>
+    <pre id="ai2-diff">(no diff yet)</pre>
+  </div>
+
+  <div class="row">
+    <h3>Recent plans</h3>
+    <ul id="ai2-plans"></ul>
+  </div>
+
+  <div class="row">
+    <h3>Queued jobs</h3>
+    <ul id="ai2-jobs"></ul>
+  </div>
+
+  <!-- If you host UI on a different path, set window.AI2_API_BASE before this script -->
+  <script src="/ai2/static/app.ui.js"></script>
+</body>
+</html>
