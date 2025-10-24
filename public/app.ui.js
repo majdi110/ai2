@@ -4,6 +4,7 @@
 (() => {
   const API = (window.AI2_API_BASE || '/ai2').replace(/\/+$/, ''); // allow override via window.AI2_API_BASE
   const TOKEN_KEY = 'ai2_token';
+  const IDEM = () => `ui-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
 
   // --- token helpers ---
   function setToken(tok) {
@@ -26,7 +27,7 @@
     return h;
   }
 
-  // --- tiny event bus to update <pre>/<textarea> by id if present ---
+  // --- tiny event helper to append text to <pre>/<textarea> ---
   function appendLine(el, line) {
     if (!el) return;
     if (el.tagName === 'TEXTAREA') {
@@ -62,12 +63,11 @@
       if (done) break;
       buf += decoder.decode(value, { stream: true });
 
-      // SSE frames are separated by a blank line; each line starts with `data: `
+      // SSE frames separated by blank line; each line begins with "data: "
       let idx;
       while ((idx = buf.indexOf('\n\n')) !== -1) {
         const frame = buf.slice(0, idx).trim();
         buf = buf.slice(idx + 2);
-        // Only parse "data: ..." lines (tolerates multi-line but we send single-line)
         const dataLine = frame.split('\n').find(l => l.startsWith('data: '));
         if (!dataLine) continue;
         const jsonStr = dataLine.slice(6);
@@ -88,7 +88,7 @@
     preview_only = true,
     return_combined_diff = false,
     fallback_steps = null,
-    idempotencyKey = `ui-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    idempotencyKey = IDEM(),
     eventsTargetId = null,
     onEvent = null
   }) {
@@ -149,21 +149,88 @@
     return res.json();
   }
 
-  // --- Repo reads (auth) ---
+  // --- Repo read (auth) ---
   async function repoRead(pathRel) {
     const res = await fetch(`${API}/repo/read?path=${encodeURIComponent(pathRel)}`, { headers: authHeaders() });
     if (!res.ok) throw new Error(`repo_read ${res.status}`);
     return res.text();
   }
 
+  // --- Preview once and show combined diff (uses return_combined_diff) ---
+  async function previewAndShowDiff({ prompt, include_files = [] }) {
+    const diffEl = document.getElementById('ai2-diff');
+    if (diffEl) diffEl.textContent = '';
+    const eventsEl = document.getElementById('ai2-events');
+    if (eventsEl) eventsEl.value = '';
+
+    let finalPlanId = null;
+    await planStream({
+      prompt,
+      include_files,
+      preview_only: true,
+      return_combined_diff: true,
+      idempotencyKey: IDEM(),
+      eventsTargetId: 'ai2-events',
+      onEvent: (evt) => {
+        if (evt.event === 'final' && evt.plan && evt.plan.id) {
+          finalPlanId = evt.plan.id;
+        }
+      }
+    });
+
+    if (!finalPlanId) {
+      if (diffEl) diffEl.textContent = '(no plan id from preview)';
+      return;
+    }
+    try {
+    const j = await planRead(finalPlanId);
+    const p = j && (j.plan || j);              // preview: root; applied: {plan:{...}}
+    const txt = p && p.combined_diff ? p.combined_diff : '(no diff)';
+    if (diffEl) diffEl.textContent = txt;
+
+    } catch (e) {
+      if (diffEl) diffEl.textContent = `Failed to load plan ${finalPlanId}: ${e.message}`;
+    }
+  }
+
+  // --- Apply with an optional fallback commands step (used if planner returns no steps) ---
+  async function applyWithFallback({ prompt, include_files = [], fallbackSteps = [] }) {
+    const eventsEl = document.getElementById('ai2-events');
+    if (eventsEl) eventsEl.value = '';
+    const fb = (fallbackSteps || []).filter(Boolean);
+
+    const payload = {
+      prompt,
+      include_files,
+      preview_only: false,
+      return_combined_diff: false
+    };
+    if (fb.length) {
+      payload.fallback_steps = [{
+        type: 'commands',
+        schema: 1,
+        // omit workdir to let the server default to REPO_ROOT
+        steps: fb
+      }];
+    }
+
+    await planStream({
+      ...payload,
+      idempotencyKey: IDEM(),
+      eventsTargetId: 'ai2-events'
+    });
+  }
+
   // --- Attach a tiny UI helper if elements exist ---
   async function initWiring() {
     const btnPlan = document.getElementById('ai2-plan-btn');
+    const btnApply = document.getElementById('ai2-apply-btn');
     const taEvents = document.getElementById('ai2-events');
     const inpPrompt = document.getElementById('ai2-prompt');
     const inpToken = document.getElementById('ai2-token');
     const plansUl = document.getElementById('ai2-plans');
     const jobsUl = document.getElementById('ai2-jobs');
+    const taFallback = document.getElementById('ai2-fallback');
 
     if (inpToken) {
       inpToken.addEventListener('change', () => setToken(inpToken.value.trim()));
@@ -175,12 +242,27 @@
       btnPlan.addEventListener('click', async () => {
         if (taEvents) taEvents.value = '';
         try {
-          await planStream({
+          await previewAndShowDiff({
             prompt: inpPrompt.value,
-            include_files: ['public/index.html'],
-            preview_only: true,
-            return_combined_diff: true,
-            eventsTargetId: 'ai2-events'
+            include_files: ['public/index.html']
+          });
+        } catch (e) {
+          appendLine(taEvents, `ERROR: ${e.message}`);
+        }
+      });
+    }
+
+    if (btnApply && inpPrompt) {
+      btnApply.addEventListener('click', async () => {
+        if (taEvents) taEvents.value = '';
+        try {
+          const fb = taFallback
+            ? taFallback.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean)
+            : [];
+          await applyWithFallback({
+            prompt: inpPrompt.value,
+            include_files: ['public/index.html', 'public/app.ui.js'],
+            fallbackSteps: fb
           });
         } catch (e) {
           appendLine(taEvents, `ERROR: ${e.message}`);
@@ -223,6 +305,8 @@
   // expose API on window for quick hacking
   window.ai2 = {
     planStream,
+    previewAndShowDiff,
+    applyWithFallback,
     jobsList,
     jobLog,
     plansList,
