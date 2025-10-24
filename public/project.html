@@ -9,7 +9,8 @@
     --bg:#0b0b10;--panel:#14141c;--muted:#96a0ad;--text:#e9ecf2;--br:#262636;
     --pri:#7c5cff;--pri2:#6aa4ff;--ok:#22c55e;--err:#ef4444;
   }
-  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,Segoe UI,Roboto,Ubuntu,sans-serif}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,Segoe UI,Roboto,Ubuntu,sans-serif}
   header{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--br);background:#0e0e15}
   .row{display:flex;gap:10px;align-items:center}
   a, .link{color:#cbd5ff;text-decoration:none}
@@ -29,9 +30,17 @@
   iframe{width:100%;height:520px;border:0;background:#fff;border-radius:12px}
   pre{background:#0f0f16;border:1px solid var(--br);padding:10px;border-radius:10px;overflow:auto;font:12px/1.35 ui-monospace,Menlo,Consolas,monospace;color:#e9f}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-  input[type="text"]{width:100%;padding:10px;border-radius:10px;border:1px solid var(--br);background:#0f0f16;color:var(--text)}
+  input[type="text"]{width:100%;padding:10px;border-radius:10px;border:1px solid var(--br);background:#0f0f16;color:#e9ecf2}
   .toolbar{display:flex;gap:8px;align-items:center;margin-top:8px}
   .checkbox{display:flex;gap:8px;align-items:center}
+  ul{list-style:none;margin:8px 0 0;padding:0}
+  li{margin:6px 0}
+  code{background:#0f0f16;border:1px solid var(--br);padding:2px 6px;border-radius:6px}
+  .tabs{display:flex;gap:8px;border-bottom:1px solid var(--br);padding:8px 12px}
+  .tab{padding:6px 10px;border:1px solid var(--br);border-bottom:0;border-radius:10px 10px 0 0;background:#10101a;cursor:pointer;font-weight:600}
+  .tab.active{background:#161626}
+  .tabpanes>div{display:none}
+  .tabpanes>div.active{display:block}
 </style>
 </head>
 <body>
@@ -48,7 +57,7 @@
 
 <div class="wrap">
 
-  <!-- Left: Prompt + Chat + Save -->
+  <!-- Left: Prompt + Chat + Run (SSE) -->
   <section class="card">
     <div class="head">Prompt & Chat</div>
     <div class="body">
@@ -58,8 +67,8 @@
       <textarea id="prompt" placeholder="Describe what to build..."></textarea>
 
       <div class="toolbar">
-        <button id="run">Generate / Update</button>
-        <label class="checkbox"><input id="sse" type="checkbox"> Stream (SSE)</label>
+        <button id="run">Run Plan (SSE)</button>
+        <label class="checkbox"><input id="sse" type="checkbox" checked> Stream (SSE)</label>
       </div>
 
       <div id="chatStatus" class="tiny">Chat persisted to <code>public/users/&lt;userId&gt;/projects/&lt;projectId&gt;/chat.json</code></div>
@@ -98,237 +107,142 @@
     </div>
   </section>
 
-  <!-- Raw events / combined diff -->
+  <!-- Events / SSE log -->
   <section class="card">
     <div class="head">Events / Combined Diff</div>
     <div class="body">
-      <pre id="events">// waiting...</pre>
+      <!-- Switched to textarea to stream logs via appendLog() -->
+      <textarea id="events" placeholder="// streaming events will appear here…" style="min-height:180px"></textarea>
+    </div>
+  </section>
+
+  <!-- Jobs panel (queue/done/fail) -->
+  <section class="card">
+    <div class="head">Jobs</div>
+    <div class="body">
+      <div class="grid2">
+        <div>
+          <h3 style="margin:0 0 6px">Queued</h3>
+          <ul id="jobs-queue"></ul>
+        </div>
+        <div>
+          <h3 style="margin:0 0 6px">Done</h3>
+          <ul id="jobs-done"></ul>
+        </div>
+      </div>
+      <h3 style="margin:12px 0 6px">Failed</h3>
+      <ul id="jobs-fail"></ul>
+      <div class="tiny muted" style="margin-top:8px">Items link to JSON and .log from the server.</div>
+    </div>
+  </section>
+
+  <!-- Plans history -->
+  <section class="card">
+    <div class="head">Plans History & Readback</div>
+    <div class="body">
+      <div class="tabs">
+        <div class="tab active" data-tab="hist">History</div>
+        <div class="tab" data-tab="json">Plan JSON</div>
+      </div>
+      <div class="tabpanes">
+        <div id="tab-hist" class="active">
+          <ul id="plans"></ul>
+        </div>
+        <div id="tab-json">
+          <pre id="plan-json" style="min-height:220px">// open a plan from the list to view JSON + combined_diff</pre>
+        </div>
+      </div>
     </div>
   </section>
 
 </div>
 
+<!-- Frontend helpers (SSE runner, jobs/history loaders). Serve via /ai2/static/app.ui.js -->
+<script src="/ai2/static/app.ui.js"></script>
+
 <script>
-/* ---------- environment & params ---------- */
-const $ = s=>document.querySelector(s);
+/* --------- Minimal page wiring: env, crumbs, tabs, actions ---------- */
 const qp = new URLSearchParams(location.search);
 const userId = qp.get('userId') || (JSON.parse(localStorage.getItem('ai2_user')||'{}').userId || 'u1');
 const projectId = qp.get('projectId') || 'p1';
-$('#crumb').textContent = `user:${userId} • project:${projectId}`;
+document.querySelector('#crumb').textContent = `user:${userId} • project:${projectId}`;
 
 const ENV = JSON.parse(localStorage.getItem('ai2_env')||'{}');
-$('#envHint').textContent = ENV.API_BASE ? new URL(ENV.API_BASE).host : 'no API';
+document.querySelector('#envHint').textContent = ENV.API_BASE ? new URL(ENV.API_BASE).host : 'no API';
+window.ai2Token = ENV.API_TOKEN || '';
 
-const paths = {
-  rootDir: `users/${userId}/projects/${projectId}`,
-  projectJson: `users/${userId}/projects/${projectId}.json`,
-  filesJson:   `users/${userId}/projects/${projectId}/files.json`,
-  chatJson:    `users/${userId}/projects/${projectId}/chat.json`
-};
-
-function pretty(o){ return JSON.stringify(o, null, 2) + '\n'; }
-function lineize(s){ return String(s ?? '').replace(/\r\n/g,'\n').replace(/\r/g,'\n'); }
-function newFileDiff(path, content){
-  const lines = lineize(content).split('\n'); if(lines.at(-1)==='') lines.pop();
-  let body=''; for(const L of lines) body+='+'+L+'\n';
-  return `diff --git a/${path} b/${path}
-new file mode 100644
---- /dev/null
-+++ b/${path}
-@@ -0,0 +1,${lines.length} @@
-${body}`;
-}
-function replaceFileDiff(path, oldContent, newContent){
-  const A = lineize(oldContent).split('\n'); if(A.at(-1)==='') A.pop();
-  const B = lineize(newContent).split('\n'); if(B.at(-1)==='') B.pop();
-  let body=''; for(const L of A) body+='-'+L+'\n'; for(const L of B) body+='+'+L+'\n';
-  return `diff --git a/${path} b/${path}
---- a/${path}
-+++ b/${path}
-@@ -1,${A.length} +1,${B.length} @@
-${body}`;
-}
-async function getJSON(path){
-  const url = `/ai2/static/${path}`;
-  const r = await fetch(url,{cache:'no-store'});
-  if(!r.ok) return null;
-  return r.json();
-}
-async function dryrun(diff){
-  const base = (ENV.API_BASE||'').replace(/\/+$/,'');
-  const headers={'Content-Type':'application/json'};
-  if(ENV.DRYRUN_KEY) headers['X-Dryrun-Key']=ENV.DRYRUN_KEY;
-  const r = await fetch(`${base}/diff_dryrun`,{method:'POST',headers,body:JSON.stringify({diff,base_branch:ENV.BASE_BRANCH||'public'})});
-  const t = await r.text(); let j; try{ j = t?JSON.parse(t):null; }catch{}
-  if(!r.ok || (j && j.ok===false)){ const msg=(j&&(j.detail||j.error))||t||`HTTP ${r.status}`; const e=new Error(msg); e._dryrun=true; throw e;}
-  return j||{ok:true};
-}
-async function applyPlanPrompt(prompt, stream=false){
-  const base = (ENV.API_BASE||'').replace(/\/+$/,'');
-  const headers={'Content-Type':'application/json','X-Idempotency-Key':'ui-'+Date.now()};
-  if(ENV.API_TOKEN) headers.Authorization='Bearer '+ENV.API_TOKEN;
-  const body = {
-    prompt,
-    preview_only:false,
-    return_combined_diff:true
+/* Simple tab switcher */
+document.querySelectorAll('.tab').forEach(tab=>{
+  tab.onclick = ()=>{
+    document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+    tab.classList.add('active');
+    const tgt = tab.dataset.tab;
+    document.querySelectorAll('.tabpanes>div').forEach(p=>p.classList.remove('active'));
+    document.querySelector(`#tab-${tgt}`).classList.add('active');
   };
-  if(!stream){
-    const r = await fetch(`${base}/plan`,{method:'POST',headers,body:JSON.stringify(body)});
-    const t = await r.text(); let j; try{ j=JSON.parse(t);}catch{}
-    if(!r.ok || !j || j.ok===false){ throw new Error((j&&(j.error||j.detail))||t||`HTTP ${r.status}`); }
-    return j;
-  }else{
-    const r = await fetch(`${base}/plan?stream=1`,{
-      method:'POST',headers:{...headers,'Accept':'text/event-stream'},
-      body:JSON.stringify(body)
-    });
-    const reader = r.body.getReader();
-    const dec = new TextDecoder(); let buf='';
-    while(true){
-      const {done,value} = await reader.read();
-      if(done) break;
-      buf += dec.decode(value,{stream:true});
-      $('#events').textContent = buf;
-    }
-    // not all SSE responses end with a JSON blob; return null and let caller refetch last job if needed
-    return null;
+});
+
+/* Preview opener */
+document.querySelector('#openStatic').onclick = ()=>{
+  const start = document.querySelector('#startPath').value.trim();
+  if (!start) return;
+  const rel = start.startsWith('public/') ? start : `public/${start}`;
+  window.open(`/ai2/static/${rel}`,'_blank');
+};
+
+/* Logout -> back to login */
+document.querySelector('#logout').onclick = ()=>{
+  localStorage.removeItem('ai2_user');
+  location.href = './login.html';
+};
+
+/* Run button -> call runPlanSSE(payload) from app.ui.js */
+document.querySelector('#run').onclick = async ()=>{
+  const prompt = (document.querySelector('#prompt').value || '').trim();
+  if (!prompt) return;
+
+  // Always ask for combined diff in previews; we run non-preview by default here.
+  const payload = {
+    prompt,
+    preview_only: false,
+    return_combined_diff: true
+    // include_files will be added by app.ui.js helper if implemented there;
+    // otherwise backend can infer.
+  };
+
+  try{
+    await runPlanSSE(payload); // defined in /public/app.ui.js
+    document.querySelector('#chatStatus').textContent = 'Submitted ✓';
+    document.querySelector('#chatStatus').className = 'tiny ok';
+  }catch(e){
+    document.querySelector('#chatStatus').textContent = 'Error: ' + (e.message || e);
+    document.querySelector('#chatStatus').className = 'tiny err';
   }
-}
+};
 
-/* ---------- load project ---------- */
-let project = null;
-let files = [];
-let chat = [];
-
-async function init(){
-  project = await getJSON(paths.projectJson) || { id: projectId, name: projectId, start_path: `${paths.rootDir}/app/index.html`, createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
-  files = await getJSON(paths.filesJson) || [];
-  chat = await getJSON(paths.chatJson) || [];
-
-  $('#startPath').value = project.start_path || `${paths.rootDir}/app/index.html`;
-  $('#filesBox').value = pretty(files);
-  renderChat();
-  refreshPreview();
-}
-init();
-
-function renderChat(){
-  const box = $('#chatView'); box.innerHTML='';
-  for(const m of chat){
-    const div = document.createElement('div');
-    div.className = 'bubble '+(m.role==='user'?'me':'');
-    div.textContent = `[${m.role}] ${m.content}`;
-    box.appendChild(div);
-  }
-  box.scrollTop = 1e6;
-}
+/* On load: refresh lists and preview */
 function refreshPreview(){
-  if(!project.start_path){ $('#preview').srcdoc='<style>body{font:14px system-ui}</style><div style="padding:20px">No start file yet.</div>'; return; }
-  $('#preview').src = `/ai2/static/${project.start_path}`;
+  const start = document.querySelector('#startPath').value.trim();
+  const iframe = document.querySelector('#preview');
+  if (!start) {
+    iframe.srcdoc = '<style>body{font:14px system-ui}</style><div style="padding:20px">No start file yet.</div>';
+    return;
+  }
+  const rel = start.startsWith('public/') ? start : `public/${start}`;
+  iframe.src = `/ai2/static/${rel}`;
 }
 
-/* ---------- save JSON helpers ---------- */
-async function saveJson(path, newObj, oldObj){
-  const patch = oldObj ? replaceFileDiff(path, pretty(oldObj), pretty(newObj))
-                       : newFileDiff(path, pretty(newObj));
-  try{ await dryrun(patch); }catch(e){ log(`Dryrun: ${e.message} (continuing)`); }
-  await applyPlanPrompt(`Apply EXACTLY this unified diff to base branch ${(ENV.BASE_BRANCH||'public')}:\n\n${patch}`);
-}
+function appendLog(x){ const t=document.querySelector('#events'); t.value += x+'\n'; t.scrollTop=t.scrollHeight; } // minimal helper for SSE logs
+window.appendLog = appendLog; // expose (the app.ui.js snippets call it)
 
-/* ---------- UI actions ---------- */
-$('#logout').onclick = ()=>{ localStorage.removeItem('ai2_user'); location.href='./login.html'; };
+function refreshJobs(){ loadJobs('queue'); loadJobs('done'); loadJobs('fail'); }
+function refreshHistory(){ loadPlansList(); }
+window.refreshJobs = refreshJobs;
+window.refreshHistory = refreshHistory;
 
-$('#saveProject').onclick = async ()=>{
-  const next = {...project, start_path: $('#startPath').value.trim() || project.start_path, updatedAt: new Date().toISOString()};
-  try{
-    await saveJson(paths.projectJson, next, project);
-    project = next;
-    $('#projectStatus').textContent = 'Saved ✓';
-    $('#projectStatus').className = 'tiny ok';
-    refreshPreview();
-  }catch(e){
-    $('#projectStatus').textContent = 'Error: ' + e.message;
-    $('#projectStatus').className = 'tiny err';
-  }
-};
-
-$('#openStatic').onclick = ()=>{
-  if(!project.start_path) return;
-  window.open(`/ai2/static/${project.start_path}`,'_blank');
-};
-
-$('#saveFiles').onclick = async ()=>{
-  let next;
-  try{ next = JSON.parse($('#filesBox').value || '[]'); }catch(e){
-    $('#filesStatus').textContent = 'Invalid JSON'; $('#filesStatus').className='tiny err'; return;
-  }
-  try{
-    await saveJson(paths.filesJson, next, files);
-    files = next;
-    $('#filesStatus').textContent='Saved ✓'; $('#filesStatus').className='tiny ok';
-  }catch(e){
-    $('#filesStatus').textContent='Error: '+e.message; $('#filesStatus').className='tiny err';
-  }
-};
-
-function log(s){ const p = $('#events'); p.textContent += (p.textContent ? '\n' : '') + s; p.scrollTop = 1e6; }
-
-/* ---------- RUN / GENERATE ---------- */
-$('#run').onclick = async ()=>{
-  const text = $('#prompt').value.trim();
-  if(!text) return;
-
-  // persist chat log first
-  const msg = {role:'user', content:text, ts:new Date().toISOString()};
-  const nextChat = [...chat, msg];
-  try{ await saveJson(paths.chatJson, nextChat, chat); chat = nextChat; renderChat(); }catch(e){ log('chat save failed: '+e.message); }
-
-  // compose strong constraints so the model writes into the project dir
-  const constraints = `
-Write code to the repository via your plan patches.
-All created files MUST live under: public/${paths.rootDir}/app
-Create an entry file at: public/${paths.rootDir}/app/index.html
-Prefer plain HTML/CSS/JS for previews.`;
-
-  const fullPrompt = `${text}
-
-${constraints}
-(When modifying, update existing files instead of creating a different page.)`;
-
-  log('Submitting /plan' + ($('#sse').checked?' (stream)':'') + ' …');
-
-  try{
-    const res = await applyPlanPrompt(fullPrompt, $('#sse').checked);
-
-    // Non-stream path: we can parse combined diff to refresh files/start_path
-    if(res && res.plan){
-      const filesCreated = [];
-      for(const step of (res.plan.steps||[])){
-        const m = String(step.diff||'').match(/^\+\+\+ b\/(.+)$/m);
-        if(m) filesCreated.push(m[1]);
-      }
-      // if index was created, set start_path
-      const idx = filesCreated.find(f=>/\/app\/index\.html$/.test(f));
-      if(idx){ project.start_path = idx; $('#startPath').value = idx; await saveJson(paths.projectJson, project, project); }
-      // update files manifest (append uniques)
-      if(filesCreated.length){
-        const set = new Set([...(files||[]), ...filesCreated]);
-        files = [...set]; $('#filesBox').value = pretty(files);
-        await saveJson(paths.filesJson, files, files);
-      }
-      log('Applied plan ✓');
-      $('#chatStatus').textContent = 'Generated ✓'; $('#chatStatus').className='tiny ok';
-      refreshPreview();
-    }else{
-      // Stream: after events end, just refresh preview; files might already be written
-      refreshPreview();
-      $('#chatStatus').textContent = 'Stream done ✓'; $('#chatStatus').className='tiny ok';
-    }
-  }catch(e){
-    log('Error: '+e.message);
-    $('#chatStatus').textContent = 'Error: '+e.message; $('#chatStatus').className='tiny err';
-  }
-};
+refreshPreview();
+refreshJobs();
+refreshHistory();
 </script>
 </body>
 </html>
