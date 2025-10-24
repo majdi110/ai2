@@ -2,7 +2,8 @@
 
 /**
  * ai2 mini-server — robust OpenAI-backed planner with fallbacks, SSE heartbeat,
- * metrics, CORS/CSRF guard, binary patch detection, and history endpoints.
+ * metrics, CORS/CSRF guard, binary patch detection, history, audit JSONL, artifacts,
+ * and per-token path scoping (public/users/<user>/projects/<project>/…).
  *
  * Public endpoints:
  *   GET/HEAD  /ai2/                    -> "OK (ai2)"
@@ -15,10 +16,10 @@
  *   POST      /ai2/plan                -> planner (SSE via ?stream=1 or Accept: text/event-stream)
  *   GET       /ai2/metrics             -> counters (Prometheus-ish)
  *
- * Auth-required (Bearer/X-API-Key = ACTION_TOKEN):
+ * Auth-required (Bearer/X-API-Key = ACTION_TOKEN or scoped token from tokens.json):
  *   POST      /ai2/job_submit          -> enqueue commands steps
  *   POST      /ai2/diff_submit         -> enqueue unified diff as patch job
- *   POST      /ai2/diff_dryrun         -> validate unified diff only
+ *   POST      /ai2/diff_dryrun         -> validate unified diff only (optional scoped constraints)
  *   GET       /ai2/plans/list|read
  *   GET/POST  /ai2/repo/ls|read|download
  *   GET/POST  /ai2/jobs/list|log
@@ -84,7 +85,6 @@ function maybeBlockBrowserPost(req, res, needsAuth) {
   const hdrs = req.headers || {};
   const hasSig = (String(hdrs['x-requested-with']||'') === 'ai2-ui') || Boolean(hdrs['x-csrf-token']);
   const looksBrowser = Boolean(hdrs['origin'] || (hdrs['user-agent']||'').includes('Mozilla'));
-  // If it's a browser and lacks CSRF header, reject early (auth check still applies later)
   if (looksBrowser && !hasSig) {
     res.writeHead(403, { 'Content-Type':'application/json' });
     res.end(JSON.stringify({ ok:false, error:'csrf_required' }));
@@ -160,6 +160,16 @@ function execp(cmd, args, opts) {
 }
 const ipOf = (req) => String(req.headers['x-forwarded-for'] || (req.socket && req.socket.remoteAddress) || '');
 
+// --- Audit log (append-only JSONL)
+const AUDIT_LOG = '/home/genweb/agent/logs/audit.jsonl';
+try { fs.mkdirSync(path.dirname(AUDIT_LOG), { recursive:true, mode:0o700 }); } catch {}
+function auditWrite(evt) {
+  try {
+    const rec = { ts: nowISO(), ...evt };
+    fs.appendFileSync(AUDIT_LOG, JSON.stringify(rec) + '\n', { mode:0o600 });
+  } catch {}
+}
+
 /* ---------------- Dirs & constants ---------------- */
 const STATIC_ROOT  = path.join(__dirname, 'public');
 const VERSION_FILE = path.join(__dirname, 'VERSION.txt');
@@ -170,6 +180,29 @@ const FAIL_DIR    = '/home/genweb/agent/failures';
 const LOG_DIR     = '/home/genweb/agent/logs';
 const PLANS_DIR   = '/home/genweb/agent/work/plans';
 
+// Plan artifacts
+const ARTIFACTS_DIR = '/home/genweb/agent/artifacts';
+try { fs.mkdirSync(ARTIFACTS_DIR, { recursive:true, mode:0o755 }); } catch {}
+
+function writePlanArtifacts(planObj, opts = {}) {
+  try {
+    const dir = path.join(ARTIFACTS_DIR, String(planObj.id || planObj.plan?.id || 'unknown'));
+    fs.mkdirSync(dir, { recursive:true, mode:0o755 });
+
+    const envelope = planObj.plan ? planObj : { plan: planObj };
+    fs.writeFileSync(path.join(dir, 'plan.json'), JSON.stringify(envelope, null, 2), { mode:0o600 });
+
+    const p = planObj.plan || planObj;
+    if (p && p.combined_diff) {
+      fs.writeFileSync(path.join(dir, 'combined.patch'), String(p.combined_diff), { mode:0o600 });
+    }
+
+    if (opts.status) {
+      fs.writeFileSync(path.join(dir, 'status.txt'), `status=${opts.status}\n`, { mode:0o600 });
+    }
+  } catch {}
+}
+
 const REPO_ROOT      = '/home/genweb/public_html/datav.belocloud.com/ai2';
 const LIST_MAX_DEPTH = 3;
 const LIST_MAX_ITEMS = 2000;
@@ -178,6 +211,20 @@ const HIDE_NAMES     = new Set(['.git', 'node_modules', '.env']);
 // OpenAI model (key loaded lazily)
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || ''; // not used directly — see getOpenAIKey()
 const OPENAI_MODEL   = process.env.OPENAI_MODEL   || 'gpt-4o-mini';
+
+// ----- Token-scoped prefixes (Option B) -----
+const TOKENS_FILE = '/home/genweb/agent/tokens.json';
+let TOKENS_CACHE = null, TOKENS_MTIME = 0;
+function loadTokensFile() {
+  try {
+    const st = fs.statSync(TOKENS_FILE);
+    if (!TOKENS_CACHE || st.mtimeMs !== TOKENS_MTIME) {
+      TOKENS_CACHE = JSON.parse(fs.readFileSync(TOKENS_FILE, 'utf8') || '{}');
+      TOKENS_MTIME = st.mtimeMs;
+    }
+  } catch { TOKENS_CACHE = null; TOKENS_MTIME = 0; }
+  return TOKENS_CACHE || {};
+}
 
 // Planner retry + circuit-breaker
 const PLAN_MAX_RETRIES       = parseInt(process.env.PLAN_MAX_RETRIES || '2', 10);
@@ -336,7 +383,6 @@ function buildPlannerSystemPrompt() {
     '{ "schema":1,"id":"ex-del-1","status":"planned","goal":"Remove deprecated file","constraints":{"base_branch":"public","allowed_ops":["create","modify","delete"],"root_dir":"'+ROOT+'"},"steps":[{ "type":"patch","op":"delete","base_branch":"public","message":"Remove old file","diff":"diff --git a/public/old.txt b/public/old.txt\\ndeleted file mode 100644\\nindex 1a2b3c4..0000000\\n--- a/public/old.txt\\n+++ /dev/null\\n@@ -1,1 +0,0 @@\\n-legacy content\\n" }],"combined_diff":null,"artifacts":null,"telemetry":null }',
   ];
 
-  // Verbose few-shots toggled by PROMPT_VERBOSE=1
   const VERBOSE = (process.env.PROMPT_VERBOSE || '') && process.env.PROMPT_VERBOSE !== '0';
   if (VERBOSE) {
     base.push(
@@ -419,12 +465,12 @@ function normalizeDiff(raw) {
 function looksBinaryDiff(diff) {
   return /^(?:GIT binary patch|literal \d+)/m.test(String(diff||''));
 }
-function stepPathsUnderRepo(diff) {
+function stepPathsUnderRepo(diff, prefixes = ALLOWED_PATH_PREFIXES) {
   const re = /^diff --git a\/([^\n]+) b\/([^\n]+)$/mg;
   let m; let n = 0;
   const isDevNull = (p) => p === '/dev/null' || p === 'dev/null';
   const pathAllowed = (rel) =>
-    ALLOWED_PATH_PREFIXES.length === 0 || ALLOWED_PATH_PREFIXES.some(p => rel.startsWith(p));
+    prefixes.length === 0 || prefixes.some(p => rel.startsWith(p));
   while ((m = re.exec(diff)) !== null) {
     n++;
     const a = m[1], b = m[2];
@@ -479,6 +525,49 @@ async function gitDryRun(diff, baseBranch=CANONICAL_BRANCH) {
   }
 }
 
+/* ---------------- Auth utils ---------------- */
+// (kept for backward compat in a few places; use authCtx instead)
+function authOk(req) {
+  const bearer = String(req.headers['authorization'] || '');
+  const viaBearer = bearer.toLowerCase().startsWith('bearer ') ? bearer.slice(7).trim() : '';
+  const viaKey = String(req.headers['x-api-key'] || '').trim();
+  const token = getActionToken();
+  return Boolean(token) && (viaBearer === token || viaKey === token);
+}
+
+// Return structured auth context (global admin token OR scoped per-user token from tokens.json)
+function authCtx(req) {
+  const bearerRaw = String(req.headers['authorization'] || '');
+  const viaBearer = bearerRaw.toLowerCase().startsWith('bearer ') ? bearerRaw.slice(7).trim() : '';
+  const viaKey = String(req.headers['x-api-key'] || '').trim();
+  const presented = viaBearer || viaKey || '';
+
+  // Global admin token stays valid
+  const admin = getActionToken();
+  if (admin && presented === admin) return { ok: true, kind: 'global', token: 'ACTION_TOKEN' };
+
+  // Scoped token from tokens.json
+  const map = (loadTokensFile().tokens || {});
+  const rec = map[presented];
+  if (rec && rec.user) {
+    const projects = Array.isArray(rec.projects) && rec.projects.length ? rec.projects.map(String) : ['*'];
+    return { ok: true, kind: 'scoped', token: presented.slice(0,8)+'…', user: String(rec.user), projects };
+  }
+  return { ok:false };
+}
+
+// Compute allowed path prefixes from auth context
+function allowedPrefixesFromAuth(auth) {
+  if (auth && auth.ok && auth.kind === 'scoped') {
+    if (auth.projects.includes('*')) {
+      return [ `public/users/${auth.user}/projects/` ];
+    }
+    return auth.projects.map(p => `public/users/${auth.user}/projects/${String(p).replace(/[^A-Za-z0-9._-]/g,'')}/`);
+  }
+  // Fallback: env-level prefixes (for admin/global token)
+  return ALLOWED_PATH_PREFIXES;
+}
+
 /* ---------------- Envelope normalize/validate ---------------- */
 function normalizeIncomingPlan(body, baseBranch, goalText) {
   if (Array.isArray(body.steps)) {
@@ -531,7 +620,8 @@ function normalizeIncomingPlan(body, baseBranch, goalText) {
   return null;
 }
 
-function validatePlanEnvelope(plan) {
+// Accept dynamic allowed prefixes (from token scope)
+function validatePlanEnvelope(plan, prefixes = ALLOWED_PATH_PREFIXES) {
   if (!isObj(plan)) return 'plan_not_object';
   if ((plan.schema|0) !== 1) return 'bad_schema';
   if (typeof plan.id !== 'string' || !plan.id) return 'missing_id';
@@ -544,7 +634,7 @@ function validatePlanEnvelope(plan) {
     if (!isObj(s) || typeof s.type !== 'string') return `step_${i}_bad_type`;
     if (s.type === 'patch') {
       if (typeof s.diff === 'string') s.diff = normalizeDiff(s.diff);
-      if (looksBinaryDiff(s.diff)) return `step_${i}_binary_patch`; // explicit binary guard
+      if (looksBinaryDiff(s.diff)) return `step_${i}_binary_patch`;
       if (!['create','modify','delete'].includes(String(s.op||''))) return `step_${i}_bad_op`;
       if (typeof s.diff !== 'string' || !s.diff.startsWith('diff --git ')) return `step_${i}_bad_diff`;
       const size = Buffer.byteLength(s.diff,'utf8'); if (size > MAX_DIFF_BYTES) return `step_${i}_diff_too_large`;
@@ -552,7 +642,7 @@ function validatePlanEnvelope(plan) {
       let m; let count=0;
       const isDevNull = (p) => p === '/dev/null' || p === 'dev/null';
       const pathAllowed = (rel) =>
-        ALLOWED_PATH_PREFIXES.length === 0 || ALLOWED_PATH_PREFIXES.some(p => rel.startsWith(p));
+        prefixes.length === 0 || prefixes.some(p => rel.startsWith(p));
       while ((m = pairsRe.exec(s.diff)) !== null) {
         count++;
         const a=m[1], b=m[2];
@@ -592,12 +682,11 @@ async function callOpenAIPlan(userPrompt) {
       { role: 'system', content: system },
       { role: 'user',   content: String(userPrompt) }
     ],
-    text: { format: { type: "json_object" } } // valid: json_object | text | json_schema
+    text: { format: { type: "json_object" } }
   };
 
   const j = await openaiWithRetry(body);
 
-  // Parse text
   const txt =
     j.output_text ||
     (j.output?.[0]?.content?.[0]?.text) ||
@@ -611,7 +700,6 @@ async function callOpenAIPlan(userPrompt) {
   try { planObj = JSON.parse(txt); }
   catch { throw new Error('openai_bad_json'); }
 
-  // Bubble usage for SSE (Responses API variants)
   const usage = j.usage || j.output?.[0]?.usage || null;
   return { plan: planObj, usage };
 }
@@ -676,19 +764,10 @@ function enforceDiffSize(diff) {
 }
 function idemSan(s) { return String(s || '').replace(/[^A-Za-z0-9._:-]/g, '_'); }
 
-/* ---------------- Auth utils ---------------- */
-function authOk(req) {
-  const bearer = String(req.headers['authorization'] || '');
-  const viaBearer = bearer.toLowerCase().startsWith('bearer ') ? bearer.slice(7).trim() : '';
-  const viaKey = String(req.headers['x-api-key'] || '').trim();
-  const token = getActionToken();
-  return Boolean(token) && (viaBearer === token || viaKey === token);
-}
-
 /* ---------------- Plans history (auth) ---------------- */
 function handlePlansList(req, res) {
   wrap(res,'plans_list'); inc(metrics.req_total,'plans_list');
-  if (!authOk(req)) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
+  const auth = authCtx(req); if (!auth.ok) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
   let files = [];
   try {
     files = fs.readdirSync(PLANS_DIR)
@@ -700,7 +779,7 @@ function handlePlansList(req, res) {
 }
 function handlePlansRead(req, res) {
   wrap(res,'plans_read'); inc(metrics.req_total,'plans_read');
-  if (!authOk(req)) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
+  const auth = authCtx(req); if (!auth.ok) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
   const id = (new URL(req.url,'http://x')).searchParams.get('id') || '';
   const safe = String(id).replace(/[^A-Za-z0-9._-]/g,'');
   if (!safe) return sendJSON(res, 400, { ok:false, error:'bad_id' });
@@ -744,11 +823,21 @@ async function handlePlan(req, res) {
 
   const REQUIRE_PLAN_AUTH = (process.env.PLAN_AUTH_REQUIRED || '1') !== '0';
   if (!maybeBlockBrowserPost(req,res,REQUIRE_PLAN_AUTH)) return;
-  if (REQUIRE_PLAN_AUTH && !authOk(req)) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
+  const auth = authCtx(req);
+  if (REQUIRE_PLAN_AUTH && !auth.ok) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
 
   const ip = ipOf(req);
+  auditWrite({
+    kind: 'plan_request',
+    ip,
+    ua: String(req.headers['user-agent'] || ''),
+    idem: String(req.headers['x-idempotency-key'] || ''),
+  });
+
   const rl = rlCheck(ip, 'plan', 30);
   if (!rl.ok) return sendJSON(res, 429, { ok:false, error:'rate_limited', retry_after: RL_RETRY_AFTER_SEC });
+
+  const dynamicPrefixes = allowedPrefixesFromAuth(auth);
 
   const parsedUrl = url.parse(req.url || '', true);
   const wantsSSE = String(parsedUrl.query && parsedUrl.query.stream || '') === '1'
@@ -775,7 +864,6 @@ async function handlePlan(req, res) {
       'X-Accel-Buffering': 'no'
     });
     try { res.write(`data: ${JSON.stringify({ event: 'planning_started', ts: nowISO() })}\n\n`); } catch {}
-    // Heartbeat every 15s
     hb = setInterval(() => { try { res.write(':\n\n'); } catch {} }, 15000);
   }
 
@@ -838,12 +926,11 @@ async function handlePlan(req, res) {
       if (!prompt) { if (wantsSSE){ sseEmit('final',{ok:false,error:'prompt_required'}); try{sseEnd();res.end();}catch{} } return sendJSON(res, 400, { ok:false, error:'prompt_required' }); }
       if (prompt.length > MAX_PROMPT_CHARS) { if (wantsSSE){ sseEmit('final',{ok:false,error:'prompt_too_long',limit:MAX_PROMPT_CHARS}); try{sseEnd();res.end();}catch{} } return sendJSON(res, 413, { ok:false, error:'prompt_too_long', limit: MAX_PROMPT_CHARS }); }
 
-      // Try OpenAI (with retries)
       try {
         const effPrompt = injectContextIntoPrompt(prompt, contextBlock);
         const aiResp = await planWithRetry(effPrompt, sseEmit);
         if (wantsSSE && aiResp && aiResp.usage) sseEmit('openai_tokens', aiResp.usage);
-        const ai = aiResp.plan || aiResp; // backward-compat
+        const ai = aiResp.plan || aiResp;
         plan = normalizeIncomingPlan(
           isObj(ai) && Array.isArray(ai.steps) ? { steps: ai.steps, preview_only: previewOnly, goal: goalText } :
           isObj(ai) && Array.isArray(ai.plan)  ? { plan:  ai.plan,  preview_only: previewOnly, goal: goalText } :
@@ -853,11 +940,10 @@ async function handlePlan(req, res) {
         );
         if (!plan) throw new Error('ai_bad_plan_shape');
       } catch (e2) {
-        // Fallback when OpenAI call fails
         if (rawFallbackSteps && rawFallbackSteps.length) {
           try {
             const fbPlan = normalizeIncomingPlan({ steps: rawFallbackSteps, preview_only: previewOnly, goal: goalText }, br.branch, goalText);
-            const fbErr = fbPlan ? validatePlanEnvelope(fbPlan) : 'bad_fallback_shape';
+            const fbErr = fbPlan ? validatePlanEnvelope(fbPlan, dynamicPrefixes) : 'bad_fallback_shape';
             if (fbErr) throw new Error(fbErr);
             sseEmit('fallback_used', { reason: String(e2 && e2.message || e2).slice(0,200), count: fbPlan.steps.length });
             plan = fbPlan; fallbackUsed = true;
@@ -877,7 +963,7 @@ async function handlePlan(req, res) {
       if (rawFallbackSteps && rawFallbackSteps.length) {
         try {
           const fbPlan = normalizeIncomingPlan({ steps: rawFallbackSteps, preview_only: previewOnly, goal: goalText }, br.branch, goalText);
-          const fbErr = fbPlan ? validatePlanEnvelope(fbPlan) : 'bad_fallback_shape';
+          const fbErr = fbPlan ? validatePlanEnvelope(fbPlan, dynamicPrefixes) : 'bad_fallback_shape';
           if (fbErr) throw new Error(fbErr);
           plan = fbPlan; fallbackUsed = true;
           sseEmit('fallback_used', { reason: 'missing_steps', count: plan.steps.length });
@@ -889,12 +975,12 @@ async function handlePlan(req, res) {
     }
 
     // Validate envelope; fallback on missing_steps if provided
-    let verr = validatePlanEnvelope(plan);
+    let verr = validatePlanEnvelope(plan, dynamicPrefixes);
     if (verr) {
       if (verr === 'missing_steps' && rawFallbackSteps && rawFallbackSteps.length) {
         try {
           const fbPlan = normalizeIncomingPlan({ steps: rawFallbackSteps, preview_only: previewOnly, goal: goalText }, br.branch, goalText);
-          const fbErr = fbPlan ? validatePlanEnvelope(fbPlan) : 'bad_fallback_shape';
+          const fbErr = fbPlan ? validatePlanEnvelope(fbPlan, dynamicPrefixes) : 'bad_fallback_shape';
           if (fbErr) throw new Error(fbErr);
           plan = fbPlan; verr = null; fallbackUsed = true;
           sseEmit('fallback_used', { reason: 'missing_steps', count: plan.steps.length });
@@ -906,19 +992,29 @@ async function handlePlan(req, res) {
     }
     if (verr) { if (wantsSSE){ sseEmit('final',{ok:false,error:verr,plan:{id:plan.id,status:'failed'}}); try{sseEnd();res.end();}catch{} } return sendJSON(res, 422, { ok:false, error: verr, plan }); }
 
-    sseEmit('validated', { ok:true, steps: plan.steps.length });
     if (wantCombined) plan.combined_diff = buildCombinedDiffFromSteps(plan.steps);
+
+    sseEmit('validated', { ok:true, steps: plan.steps.length });
+
+    auditWrite({
+      kind: 'plan_validated',
+      plan_id: plan.id,
+      steps: plan.steps.length,
+      preview: previewOnly,
+      combined_diff_bytes: Buffer.byteLength(String(plan.combined_diff || ''), 'utf8')
+    });
 
     if (previewOnly) {
       plan.status = 'preview';
       plan.telemetry = { preview_only:true, ts: nowISO() };
       try { fs.writeFileSync(path.join(PLANS_DIR, `${plan.id}.json`), JSON.stringify(plan,null,2)); } catch{}
+      writePlanArtifacts(plan, { status: 'preview' });
+
       if (wantsSSE) { sseEmit('final', { ok:true, status:'preview', plan:{ id:plan.id, status:plan.status, steps:plan.steps.length } }); try { sseEnd(); return res.end(); } catch {} }
       else return sendJSON(res, 200, { ok:true, plan });
       return;
     }
 
-    // Apply path
     const stepResults = [];
     for (let i=0;i<plan.steps.length;i++) {
       const s = plan.steps[i];
@@ -936,11 +1032,10 @@ async function handlePlan(req, res) {
             stepResults.push({ i, type:'patch', ok:false, error:'dryrun_failed', detail:(check.error||'').slice(0,400) });
             sseEmit('step_error', { i, error:'dryrun_failed', detail:(check.error||'').slice(0,200) });
 
-            // Fallback on dryrun failure
             if (!fallbackUsed && rawFallbackSteps && rawFallbackSteps.length) {
               try {
                 const fbPlan = normalizeIncomingPlan({ steps: rawFallbackSteps, preview_only: previewOnly, goal: goalText }, br.branch, goalText);
-                const fbErr = fbPlan ? validatePlanEnvelope(fbPlan) : 'bad_fallback_shape';
+                const fbErr = fbPlan ? validatePlanEnvelope(fbPlan, dynamicPrefixes) : 'bad_fallback_shape';
                 if (fbErr) throw new Error(fbErr);
                 sseEmit('fallback_used', { reason:'dryrun_failed', at_step:i, count: fbPlan.steps.length });
                 for (let j=0;j<fbPlan.steps.length;j++) {
@@ -985,6 +1080,14 @@ async function handlePlan(req, res) {
           });
           stepResults.push({ i, type:'patch', ok:true, queued: out.queued, sha256: out.sha256 });
           sseEmit('enqueued', { i, queued: out.queued });
+
+          auditWrite({
+            kind: 'patch_enqueued',
+            plan_id: plan.id,
+            step_index: i,
+            queued: out.queued,
+            sha256: out.sha256
+          });
         } else if (s.type === 'commands') {
           const vErr = validateCommandsSteps(s.steps);
           if (vErr) {
@@ -1001,6 +1104,14 @@ async function handlePlan(req, res) {
           });
           stepResults.push({ i, type:'commands', ok:true, queued: out.queued });
           sseEmit('enqueued', { i, queued: out.queued });
+
+          auditWrite({
+            kind: 'commands_enqueued',
+            plan_id: plan.id,
+            step_index: i,
+            queued: out.queued,
+            steps_count: (Array.isArray(s.steps) ? s.steps.length : 0)
+          });
         }
       } catch (e3) {
         stepResults.push({ i, ok:false, error:String(e3 && e3.message || e3).slice(0,400) });
@@ -1012,6 +1123,16 @@ async function handlePlan(req, res) {
     if (plan.status !== 'failed') plan.status = 'applied';
     plan.telemetry = { continue_on_error: continueOnError, ts: nowISO(), steps_applied: plan.steps.length };
     try { fs.writeFileSync(path.join(PLANS_DIR, `${plan.id}.json`), JSON.stringify({ plan, stepResults }, null, 2)); } catch{}
+
+    writePlanArtifacts({ plan, stepResults }, { status: plan.status });
+
+    auditWrite({
+      kind: 'plan_final',
+      plan_id: plan.id,
+      status: plan.status,
+      steps: plan.steps.length,
+      fallback_used: fallbackUsed || false
+    });
 
     if (wantsSSE) {
       sseEmit('final', { ok: plan.status === 'applied', status: plan.status, plan: { id: plan.id, status: plan.status, steps: plan.steps.length } });
@@ -1042,7 +1163,7 @@ function handleEcho(req,res){ applyCORS(req,res); wrap(res,'echo'); inc(metrics.
 
 function handleRepoLs(req, res) {
   wrap(res,'repo_ls'); inc(metrics.req_total,'repo_ls');
-  if (!authOk(req)) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
+  const auth = authCtx(req); if (!auth.ok) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
   try {
     const u  = new URL(req.url, 'http://x');
     const p  = u.searchParams.get('path') || '';
@@ -1068,7 +1189,7 @@ function handleRepoLs(req, res) {
 }
 function handleRepoRead(req, res) {
   wrap(res,'repo_read'); inc(metrics.req_total,'repo_read');
-  if (!authOk(req)) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
+  const auth = authCtx(req); if (!auth.ok) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
   try {
     const u = new URL(req.url, 'http://x');
     const p = u.searchParams.get('path') || '';
@@ -1080,7 +1201,7 @@ function handleRepoRead(req, res) {
 }
 function handleRepoDownload(req, res) {
   wrap(res,'repo_download'); inc(metrics.req_total,'repo_download');
-  if (!authOk(req)) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
+  const auth = authCtx(req); if (!auth.ok) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
   try {
     const u = new URL(req.url, 'http://x');
     const p = u.searchParams.get('path') || '';
@@ -1093,7 +1214,7 @@ function handleRepoDownload(req, res) {
 
 function handleJobsList(req, res) {
   wrap(res,'jobs_list'); inc(metrics.req_total,'jobs_list');
-  if (!authOk(req)) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
+  const auth = authCtx(req); if (!auth.ok) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
   const parsed = url.parse(req.url, true);
   const state = String(parsed.query.state || 'queue');
   let limit = parseInt(String(parsed.query.limit || '100'), 10);
@@ -1115,7 +1236,7 @@ function handleJobsList(req, res) {
 }
 function handleJobsLog(req, res) {
   wrap(res,'jobs_log'); inc(metrics.req_total,'jobs_log');
-  if (!authOk(req)) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
+  const auth = authCtx(req); if (!auth.ok) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
   const parsed = url.parse(req.url, true);
   const raw = String(parsed.query.file || '');
   const safe = String(raw || '').replace(/[^A-Za-z0-9._-]/g, '');
@@ -1159,7 +1280,7 @@ function handleJobsLog(req, res) {
 async function handleDiffSubmit(req, res) {
   applyCORS(req,res); wrap(res,'diff_submit'); inc(metrics.req_total,'diff_submit');
   if (!maybeBlockBrowserPost(req,res,true)) return;
-  if (!authOk(req)) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
+  const auth = authCtx(req); if (!auth.ok) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
   readBodyLimited(req, 512*1024, async (err, buf) => {
     if (err) return sendJSON(res, err.code === 413 ? 413 : 400, { ok:false, error: err.message || 'read_error' });
     try {
@@ -1173,8 +1294,17 @@ async function handleDiffSubmit(req, res) {
       const idemBody   = String(body.idempotency_key || '');
       const idemVal    = idemHeader || idemBody || '';
       const sizeChk = enforceDiffSize(diff); if (!sizeChk.ok) return sendJSON(res, 413, { ok:false, error:sizeChk.msg });
-      const pchk = stepPathsUnderRepo(diff); if (!pchk.ok) return sendJSON(res, 400, { ok:false, error:pchk.error });
+      const pchk = stepPathsUnderRepo(diff, allowedPrefixesFromAuth(auth)); if (!pchk.ok) return sendJSON(res, 400, { ok:false, error:pchk.error });
       const out = await enqueuePatchJob({ base, message, diff, idemVal, reqInfo: { from:'diff_submit', ip: ipOf(req), ua: String(req.headers['user-agent'] || '') } });
+
+      auditWrite({
+        kind: 'diff_submit',
+        ip: ipOf(req),
+        message,
+        queued: out.queued,
+        sha256: out.sha256
+      });
+
       return sendJSON(res, 200, { ok:true, ...out });
     } catch { return sendJSON(res, 400, { ok:false, error:'bad_request' }); }
   });
@@ -1182,6 +1312,9 @@ async function handleDiffSubmit(req, res) {
 async function handleDiffDryRun(req, res) {
   applyCORS(req,res); wrap(res,'diff_dryrun'); inc(metrics.req_total,'diff_dryrun');
   if (!maybeBlockBrowserPost(req,res,false)) return;
+
+  // auth not required for dryrun, but constrain paths if a scoped token is supplied
+  const auth = authCtx(req); // may be {ok:false}
 
   const ip = ipOf(req);
   const rl = rlCheck(ip, 'dryrun', DRYRUN_RL_PER_MIN);
@@ -1200,7 +1333,7 @@ async function handleDiffDryRun(req, res) {
       diff = normalizeDiff(diff);
       if (looksBinaryDiff(diff)) return sendJSON(res, 400, { ok:false, error:'binary_patch' });
       const sizeChk = enforceDiffSize(diff); if (!sizeChk.ok) return sendJSON(res, 413, { ok:false, error:sizeChk.msg });
-      const pchk = stepPathsUnderRepo(diff); if (!pchk.ok) return sendJSON(res, 400, { ok:false, error:pchk.error });
+      const pchk = stepPathsUnderRepo(diff, allowedPrefixesFromAuth(auth)); if (!pchk.ok) return sendJSON(res, 400, { ok:false, error:pchk.error });
       const out = await gitDryRun(diff, base);
       return sendJSON(res, out.ok ? 200 : 422, { ok: !!out.ok, result: out.ok ? 'ok' : 'fail', detail: out.error || null });
     } catch { return sendJSON(res, 400, { ok:false, error:'bad_json' }); }
@@ -1211,7 +1344,7 @@ async function handleDiffDryRun(req, res) {
 async function handleJobSubmit(req, res) {
   applyCORS(req,res); wrap(res,'job_submit'); inc(metrics.req_total,'job_submit');
   if (!maybeBlockBrowserPost(req,res,true)) return;
-  if (!authOk(req)) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
+  const auth = authCtx(req); if (!auth.ok) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
 
   readBodyLimited(req, 512*1024, async (err, buf) => {
     if (err) return sendJSON(res, err.code === 413 ? 413 : 400, { ok:false, error: err.message || 'read_error' });
@@ -1225,6 +1358,14 @@ async function handleJobSubmit(req, res) {
       const idemBody   = String(body.idempotency_key || '');
       const idemVal    = idemHeader || idemBody || '';
       const out = enqueueCommandsJob({ schema:1, steps, workdir, idemVal, reqInfo: { from:'job_submit_action_node', ip: ipOf(req), ua: String(req.headers['user-agent'] || '') } });
+
+      auditWrite({
+        kind: 'job_submit',
+        ip: ipOf(req),
+        queued: out.queued,
+        steps_count: steps.length
+      });
+
       return sendJSON(res, 200, { ok:true, ...out });
     } catch { return sendJSON(res, 400, { ok:false, error:'bad_request' }); }
   });
