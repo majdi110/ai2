@@ -1,0 +1,89 @@
+// handlers/plan.js
+'use strict';
+
+const url = require('url');
+const { wrap, sendJSON, readBodyLimited } = require('../utils/http');
+const { maybeBlockBrowserPost } = require('../utils/cors');
+const { MAX_PLAN_BODY_BYTES, CANONICAL_BRANCH } = require('../config/constants');
+
+const { injectContextIntoPrompt, planWithRetry } = require('../services/planner');
+const { writePlanArtifacts } = require('../services/storage');
+
+const {
+  normalizeDiff,
+  looksBinaryDiff,
+  stepPathsUnderRepo,
+  buildCombinedDiffFromSteps,
+  inferStepOpFromDiff
+} = require('../utils/diff');
+
+function parseJSONSafe(buf) {
+  try { return JSON.parse(String(buf || '{}')); }
+  catch { return null; }
+}
+
+async function handlePlan(req, res) {
+  wrap(res, 'plan');
+
+  if (req.method !== 'POST') { res.statusCode = 405; return res.end(); }
+
+  // Basic browser CSRF guard (curl/tests: send X-Requested-With: ai2-ui)
+  if (!maybeBlockBrowserPost(req, res)) return;
+
+  // Read & parse request body
+  let bodyBuf;
+  try {
+    bodyBuf = await new Promise((resolve, reject) =>
+      readBodyLimited(req, MAX_PLAN_BODY_BYTES, (e, b) => e ? reject(e) : resolve(b))
+    );
+  } catch (e) {
+    const code = e && e.code === 413 ? 413 : 400;
+    return sendJSON(res, code, { ok:false, error: String(e.code || e.message || 'bad_request') });
+  }
+  const body = parseJSONSafe(bodyBuf);
+  if (!body || typeof body.prompt !== 'string' || !body.prompt.trim()) {
+    return sendJSON(res, 400, { ok:false, error:'missing_prompt' });
+  }
+
+  // Build effective prompt (optional context)
+  const effectivePrompt = injectContextIntoPrompt(body.prompt, String(body.context || '').trim());
+
+  // Call planner (with retries / CB already inside)
+  let planned, usage;
+  try {
+    const { plan, usage: u } = await planWithRetry(effectivePrompt);
+    planned = plan;
+    usage = u || null;
+  } catch (e) {
+    return sendJSON(res, 502, { ok:false, error: 'planner_failed', detail: String(e.message || e).slice(0,200) });
+  }
+
+  // Normalize & validate diffs, infer ops, and build combined_diff
+  if (Array.isArray(planned.steps)) {
+    for (const s of planned.steps) {
+      if (s && s.type === 'patch' && typeof s.diff === 'string') {
+        s.diff = normalizeDiff(s.diff);
+        if (!s.base_branch) s.base_branch = CANONICAL_BRANCH;
+
+        if (looksBinaryDiff(s.diff)) {
+          return sendJSON(res, 400, { ok:false, error:'binary_diff_not_allowed' });
+        }
+        const pathsOk = stepPathsUnderRepo(s.diff);
+        if (!pathsOk.ok) {
+          return sendJSON(res, 400, { ok:false, error:`diff_paths_invalid:${pathsOk.error}` });
+        }
+        if (!s.op) s.op = inferStepOpFromDiff(s.diff);
+      }
+    }
+  }
+
+  const combined = buildCombinedDiffFromSteps(planned.steps || []);
+  if (combined) planned.combined_diff = combined;
+
+  // Persist artifacts (plan.json + combined.patch if present)
+  try { writePlanArtifacts(planned, { status: 'planned' }); } catch {}
+
+  return sendJSON(res, 200, { ok:true, plan: planned, usage });
+}
+
+module.exports = { handlePlan };
