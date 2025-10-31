@@ -1,9 +1,9 @@
-// router.js
 'use strict';
 const url = require('url');
 const { applyCORS } = require('./utils/cors');
 const { isRoute } = require('./utils/http');
 const { CORS_ORIGINS } = require('./config/constants');
+const { authCtx, allowedPrefixesFromAuth } = require('./utils/auth');
 
 const system = require('./handlers/system');
 const plan   = require('./handlers/plan');
@@ -15,12 +15,31 @@ function route(req, res) {
   applyCORS(req,res);
   if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
 
-  const parsed = url.parse(req.url, true);
+  const parsed   = url.parse(req.url, true);
   const pathname = parsed.pathname || '/';
 
   // Optional CORS allowlist block
-  if (CORS_ORIGINS.length && req.headers.origin && !(CORS_ORIGINS.includes('*') || CORS_ORIGINS.includes(req.headers.origin))) {
+  if (CORS_ORIGINS.length && req.headers.origin &&
+      !(CORS_ORIGINS.includes('*') || CORS_ORIGINS.includes(req.headers.origin))) {
     res.statusCode = 403; return res.end('forbidden');
+  }
+
+  // ---------- QUICK SANITY ----------
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    if (pathname === '/ai2/_ping' || pathname === '/_ping') {
+      res.writeHead(200, { 'Content-Type':'application/json' });
+      return res.end(JSON.stringify({ ok:true, route: pathname }));
+    }
+  }
+
+  // ---------- DEBUG: auth ----------
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    if (pathname === '/ai2/_auth_debug' || pathname === '/_auth_debug') {
+      const auth = authCtx(req);
+      const allowedPrefixes = allowedPrefixesFromAuth(auth);
+      res.writeHead(200, { 'Content-Type':'application/json' });
+      return res.end(JSON.stringify({ ok:true, auth, allowedPrefixes }));
+    }
   }
 
   // static
