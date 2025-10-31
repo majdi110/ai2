@@ -1,3 +1,3 @@
 'use strict';
-// Keep Passenger happy, but run our real entry
+// Passenger entry → run our real split server
 require('./server');
