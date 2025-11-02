@@ -10,6 +10,7 @@ const plan   = require('./handlers/plan');
 const diffs  = require('./handlers/diffs');
 const jobs   = require('./handlers/jobs');
 const repo   = require('./handlers/repo');
+const fsio   = require('./handlers/fs');
 
 function route(req, res) {
   applyCORS(req,res);
@@ -69,6 +70,12 @@ function route(req, res) {
 
   // planner
   if (isRoute(req, pathname, 'POST', '/ai2/plan') || isRoute(req, pathname, 'POST', '/plan')) return plan.handlePlan(req, res);
+
+  // fs (auth)
+  if (isRoute(req, pathname, ['GET','HEAD'], '/ai2/_fs/read')   || isRoute(req, pathname, ['GET','HEAD'], '/_fs/read'))   return fsio.handleFSRead(req,res);
+  if (isRoute(req, pathname, ['GET'],        '/ai2/_fs/ls')     || isRoute(req, pathname, ['GET'],        '/_fs/ls'))     return fsio.handleFSLs(req,res);
+  if (isRoute(req, pathname, 'POST',         '/ai2/_fs/write')  || isRoute(req, pathname, 'POST',         '/_fs/write'))  return fsio.handleFSWrite(req,res);
+  if (isRoute(req, pathname, 'POST',         '/ai2/_fs/delete') || isRoute(req, pathname, 'POST',         '/_fs/delete')) return fsio.handleFSDelete(req,res);
 
   // auth: jobs
   if (isRoute(req, pathname, 'POST', '/ai2/job_submit') || isRoute(req, pathname, 'POST', '/job_submit')) return jobs.handleJobSubmit(req, res);
