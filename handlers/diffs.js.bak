@@ -1,0 +1,123 @@
+// handlers/diffs.js
+'use strict';
+
+const fs   = require('fs');
+const path = require('path');
+
+const { sendJSON, readBodyLimited, wrap } = require('../utils/http');
+const { MAX_DIFF_BYTES, CANONICAL_BRANCH, DRYRUN_RL_PER_MIN, RL_RETRY_AFTER_SEC, IDEM_DIR_MARKERS } = require('../config/constants');
+
+const { gitDryRun } = require('../services/git');
+const { enqueuePatchJob } = require('../services/queue');
+const { auditWrite } = require('../services/audit');
+
+const { authCtx, allowedPrefixesFromAuth } = require('../utils/auth');
+const { rlCheck } = require('../utils/rl');
+const { idemSan, sha256hex } = require('../utils/strings');
+
+const {
+  normalizeDiff,
+  looksBinaryDiff,
+  stepPathsUnderRepo,
+  inferStepOpFromDiff,
+} = require('../utils/diff');
+
+function parseJSONSafe(buf) { try { return JSON.parse(String(buf || '{}')); } catch { return null; } }
+
+// Small fixups on common planner spacing glitches
+function sanitizeDiff(diff) {
+  return String(diff)
+    .replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    .replace(/^(\+\+\+|---)b\//mg, '$1 b/'); // ensure space: "+++ b/...", "--- b/..."
+}
+
+async function readJsonLimited(req, limit) {
+  return await new Promise((resolve, reject) =>
+    readBodyLimited(req, limit, (e, b) => e ? reject(e) : resolve(parseJSONSafe(b)))
+  );
+}
+
+async function handleDiffDryRun(req, res) {
+  wrap(res, 'diff_dryrun');
+  if (req.method !== 'POST') { res.statusCode = 405; return res.end(); }
+
+  // Require a valid scoped token
+  const auth = authCtx(req);
+  if (!auth || !auth.ok) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
+
+  // Per-IP rate limit
+  const ip = (req.socket && req.socket.remoteAddress) || '0.0.0.0';
+  const rl = rlCheck(ip, 'diff_dryrun', DRYRUN_RL_PER_MIN);
+  if (!rl.ok) return sendJSON(res, 429, { ok:false, error:'rate_limited', retry_after: RL_RETRY_AFTER_SEC });
+
+  let body;
+  try { body = await readJsonLimited(req, MAX_DIFF_BYTES); }
+  catch (e) { return sendJSON(res, e.code === 413 ? 413 : 400, { ok:false, error:String(e.code||'bad_request') }); }
+
+  const diff = sanitizeDiff((body && body.diff) || '');
+  if (!diff || typeof diff !== 'string') return sendJSON(res, 400, { ok:false, error:'missing_diff' });
+  if (Buffer.byteLength(diff, 'utf8') > MAX_DIFF_BYTES) return sendJSON(res, 413, { ok:false, error:'payload_too_large' });
+  if (looksBinaryDiff(diff)) return sendJSON(res, 400, { ok:false, error:'binary_diff_not_allowed' });
+
+  // Validate paths against token-scoped prefixes
+  const prefixes = allowedPrefixesFromAuth(auth);
+  const pathsOk = stepPathsUnderRepo(diff, prefixes);
+  if (!pathsOk.ok) return sendJSON(res, 400, { ok:false, error:`diff_paths_invalid:${pathsOk.error}` });
+
+  const branch = String(body.base_branch || CANONICAL_BRANCH);
+  const r = await gitDryRun(diff, branch);
+  if (!r.ok) return sendJSON(res, 400, { ok:false, error:r.error, detail:r.detail });
+
+  auditWrite({ route:'diff_dryrun', user: auth.user || null, prefixes, sha256: sha256hex(diff).slice(0,12) });
+  return sendJSON(res, 200, { ok:true });
+}
+
+async function handleDiffSubmit(req, res) {
+  wrap(res, 'diff_submit');
+  if (req.method !== 'POST') { res.statusCode = 405; return res.end(); }
+
+  // Require a valid scoped token
+  const auth = authCtx(req);
+  if (!auth || !auth.ok) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
+
+  let body;
+  try { body = await readJsonLimited(req, MAX_DIFF_BYTES); }
+  catch (e) { return sendJSON(res, e.code === 413 ? 413 : 400, { ok:false, error:String(e.code||'bad_request') }); }
+
+  let diff = sanitizeDiff((body && body.diff) || '');
+  if (!diff) return sendJSON(res, 400, { ok:false, error:'missing_diff' });
+  if (Buffer.byteLength(diff, 'utf8') > MAX_DIFF_BYTES) return sendJSON(res, 413, { ok:false, error:'payload_too_large' });
+  if (looksBinaryDiff(diff)) return sendJSON(res, 400, { ok:false, error:'binary_diff_not_allowed' });
+
+  // Validate paths against token-scoped prefixes
+  const prefixes = allowedPrefixesFromAuth(auth);
+  const pathsOk = stepPathsUnderRepo(diff, prefixes);
+  if (!pathsOk.ok) return sendJSON(res, 400, { ok:false, error:`diff_paths_invalid:${pathsOk.error}` });
+
+  const branch  = String(body.base_branch || CANONICAL_BRANCH);
+  const message = String(body.message || 'Apply AI2 plan');
+  const idemVal = idemSan(String(body.idempotency_key || ''));
+  const reqInfo = { ip: (req.socket && req.socket.remoteAddress) || '' };
+
+  // Optional: infer op (helpful in logs)
+  const op = inferStepOpFromDiff(diff);
+
+  // Idempotency markers
+  try { fs.mkdirSync(IDEM_DIR_MARKERS, { recursive:true, mode:0o700 }); } catch {}
+  const idemPath = idemVal ? path.join(IDEM_DIR_MARKERS, idemVal + '.json') : '';
+  if (idemPath) {
+    try {
+      const prev = JSON.parse(fs.readFileSync(idemPath, 'utf8'));
+      auditWrite({ route:'diff_submit_idem_hit', user: auth.user || null, op, prefixes, idemKey: idemVal });
+      return sendJSON(res, 200, { ok:true, enqueued: prev, op });
+    } catch {}
+  }
+
+  const q = enqueuePatchJob({ base: branch, message, diff, idemVal, reqInfo });
+  if (idemPath) { try { fs.writeFileSync(idemPath, JSON.stringify(q), { mode:0o600 }); } catch {} }
+
+  auditWrite({ route:'diff_submit', user: auth.user || null, op, prefixes, sha256: sha256hex(diff).slice(0,12), queued: q.queued });
+  return sendJSON(res, 200, { ok:true, enqueued: q, op });
+}
+
+module.exports = { handleDiffDryRun, handleDiffSubmit };
