@@ -71,6 +71,21 @@ async function handleDiffSubmit(req, res) {
   const idemVal = String(body.idempotency_key || '');
   const reqInfo = { ip: req.socket && req.socket.remoteAddress || '' };
 
+  // Server-side guard: repeat the dry-run; DO NOT enqueue on failure.
+  const dry = await gitDryRun(diff, branch);
+  if (!dry.ok) {
+    let firstPath = null;
+    const m = diff.match(/^\+\+\+ b\/([^\n]+)/m);
+    if (m) firstPath = m[1];
+    return sendJSON(res, 422, {
+      ok: false,
+      error: 'dry_run_failed',
+      detail: dry.detail,
+      first_path: firstPath,
+      advice: firstPath ? `Re-plan as MODIFY for this path; no 'new file mode'.` : undefined
+    });
+  }
+
   // Optional: infer op (unused here, but may be helpful in logs)
   const op = inferStepOpFromDiff(diff);
 
