@@ -1,22 +1,24 @@
-/* public/app.ui.js */
-/* Minimal ai2 UI helpers: plan (SSE via fetch), jobs, plans, logs. */
-
+/* public/app.ui.js - Enhanced version with better UX */
 (() => {
-  const API = (window.AI2_API_BASE || '/ai2').replace(/\/+$/, ''); // allow override via window.AI2_API_BASE
+  const API = (window.AI2_API_BASE || '/ai2').replace(/\/+$/, '');
   const TOKEN_KEY = 'ai2_token';
   const IDEM = () => `ui-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
 
-  // --- token helpers ---
+  // Token management
   function setToken(tok) {
     if (tok) sessionStorage.setItem(TOKEN_KEY, tok);
     else sessionStorage.removeItem(TOKEN_KEY);
   }
   function getToken() {
-    return sessionStorage.getItem(TOKEN_KEY) || '';
+    // Check session first, then ENV from localStorage
+    const session = sessionStorage.getItem(TOKEN_KEY);
+    if (session) return session;
+    const env = JSON.parse(localStorage.getItem('ai2_env') || '{}');
+    return env.API_TOKEN || '';
   }
-  window.ai2SetToken = setToken; // expose a simple setter
+  window.ai2SetToken = setToken;
 
-  // --- headers (auth + csrf-ish) ---
+  // Auth headers with CSRF protection
   function authHeaders(extra = {}) {
     const h = {
       'X-Requested-With': 'ai2-ui',
@@ -27,18 +29,30 @@
     return h;
   }
 
-  // --- tiny event helper to append text to <pre>/<textarea> ---
-  function appendLine(el, line) {
+  // Enhanced event logging
+  function appendLine(el, line, type = 'info') {
     if (!el) return;
+    const timestamp = new Date().toLocaleTimeString();
+    const prefix = {
+      'info': '📝',
+      'success': '✅',
+      'error': '❌',
+      'warn': '⚠️',
+      'progress': '⏳'
+    }[type] || '•';
+    
+    const formattedLine = `[${timestamp}] ${prefix} ${line}`;
+    
     if (el.tagName === 'TEXTAREA') {
-      el.value += line + '\n';
+      el.value += formattedLine + '\n';
       el.scrollTop = el.scrollHeight;
     } else {
-      el.textContent += line + '\n';
+      el.textContent += formattedLine + '\n';
+      el.scrollTop = el.scrollHeight;
     }
   }
 
-  // --- SSE over fetch (so we can send Authorization headers) ---
+  // SSE over fetch with enhanced error handling
   async function fetchSSE(url, { method = 'POST', headers = {}, bodyObj = {}, onEvent } = {}) {
     const res = await fetch(url, {
       method,
@@ -49,6 +63,7 @@
       },
       body: JSON.stringify(bodyObj)
     });
+
     if (!res.ok) {
       const txt = await res.text().catch(() => '');
       throw new Error(`HTTP ${res.status}: ${txt.slice(0, 300)}`);
@@ -63,25 +78,26 @@
       if (done) break;
       buf += decoder.decode(value, { stream: true });
 
-      // SSE frames separated by blank line; each line begins with "data: "
       let idx;
       while ((idx = buf.indexOf('\n\n')) !== -1) {
         const frame = buf.slice(0, idx).trim();
         buf = buf.slice(idx + 2);
+        
         const dataLine = frame.split('\n').find(l => l.startsWith('data: '));
         if (!dataLine) continue;
+        
         const jsonStr = dataLine.slice(6);
         try {
           const evt = JSON.parse(jsonStr);
           if (typeof onEvent === 'function') onEvent(evt);
         } catch (e) {
-          console.warn('SSE parse error', e, frame);
+          console.warn('SSE parse error', e, frame.slice(0, 100));
         }
       }
     }
   }
 
-  // --- Plan: stream events to a DOM target (optional) and a callback ---
+  // Plan with streaming and better event handling
   async function planStream({
     prompt,
     include_files = [],
@@ -90,7 +106,8 @@
     fallback_steps = null,
     idempotencyKey = IDEM(),
     eventsTargetId = null,
-    onEvent = null
+    onEvent = null,
+    onProgress = null
   }) {
     const body = {
       prompt,
@@ -105,7 +122,31 @@
 
     function handle(evt) {
       seen.push(evt);
-      if (target) appendLine(target, JSON.stringify(evt));
+      
+      // Enhanced event display
+      if (target) {
+        const type = evt.event === 'error' ? 'error' : 
+                     evt.event === 'final' ? 'success' :
+                     evt.event === 'thinking' ? 'progress' : 'info';
+        
+        let msg = '';
+        if (evt.event === 'thinking') msg = 'AI is thinking...';
+        else if (evt.event === 'planning') msg = 'Generating plan...';
+        else if (evt.event === 'validating') msg = 'Validating changes...';
+        else if (evt.event === 'queued') msg = `Queued: ${evt.job || 'job'}`;
+        else if (evt.event === 'final') msg = 'Plan completed!';
+        else if (evt.event === 'error') msg = `Error: ${evt.message || 'Unknown error'}`;
+        else msg = JSON.stringify(evt);
+        
+        appendLine(target, msg, type);
+      }
+      
+      // Progress callback
+      if (onProgress && evt.event) {
+        onProgress(evt);
+      }
+      
+      // User callback
       if (onEvent) onEvent(evt);
     }
 
@@ -118,16 +159,16 @@
     return seen;
   }
 
-  // --- Jobs list ---
+  // Jobs management
   async function jobsList(state = 'queue', limit = 50) {
-    const res = await fetch(`${API}/jobs/list?state=${encodeURIComponent(state)}&limit=${limit}`, {
-      headers: authHeaders()
-    });
+    const res = await fetch(
+      `${API}/jobs/list?state=${encodeURIComponent(state)}&limit=${limit}`,
+      { headers: authHeaders() }
+    );
     if (!res.ok) throw new Error(`jobs_list ${res.status}`);
     return res.json();
   }
 
-  // --- Job log: file can be job-*.json or *.log ---
   async function jobLog(file, lines = 200) {
     const q = `file=${encodeURIComponent(file)}&lines=${lines}`;
     const res = await fetch(`${API}/jobs/log?${q}`, { headers: authHeaders() });
@@ -137,26 +178,36 @@
     return res.text();
   }
 
-  // --- Plans ---
+  // Plans management
   async function plansList(limit = 50) {
     const res = await fetch(`${API}/plans/list?limit=${limit}`, { headers: authHeaders() });
     if (!res.ok) throw new Error(`plans_list ${res.status}`);
     return res.json();
   }
+
   async function planRead(id) {
     const res = await fetch(`${API}/plans/read?id=${encodeURIComponent(id)}`, { headers: authHeaders() });
     if (!res.ok) throw new Error(`plan_read ${res.status}`);
     return res.json();
   }
 
-  // --- Repo read (auth) ---
+  // Repo operations
   async function repoRead(pathRel) {
     const res = await fetch(`${API}/repo/read?path=${encodeURIComponent(pathRel)}`, { headers: authHeaders() });
     if (!res.ok) throw new Error(`repo_read ${res.status}`);
     return res.text();
   }
 
-  // --- Preview once and show combined diff (uses return_combined_diff) ---
+  async function repoLs(pathRel = '', depth = 1) {
+    const res = await fetch(
+      `${API}/repo/ls?path=${encodeURIComponent(pathRel)}&depth=${depth}`,
+      { headers: authHeaders() }
+    );
+    if (!res.ok) throw new Error(`repo_ls ${res.status}`);
+    return res.json();
+  }
+
+  // Preview with combined diff
   async function previewAndShowDiff({ prompt, include_files = [] }) {
     const diffEl = document.getElementById('ai2-diff');
     if (diffEl) diffEl.textContent = '';
@@ -182,34 +233,34 @@
       if (diffEl) diffEl.textContent = '(no plan id from preview)';
       return;
     }
+    
     try {
-    const j = await planRead(finalPlanId);
-    const p = j && (j.plan || j);              // preview: root; applied: {plan:{...}}
-    const txt = p && p.combined_diff ? p.combined_diff : '(no diff)';
-    if (diffEl) diffEl.textContent = txt;
-
+      const j = await planRead(finalPlanId);
+      const p = j && (j.plan || j);
+      const txt = p && p.combined_diff ? p.combined_diff : '(no diff)';
+      if (diffEl) diffEl.textContent = txt;
     } catch (e) {
       if (diffEl) diffEl.textContent = `Failed to load plan ${finalPlanId}: ${e.message}`;
     }
   }
 
-  // --- Apply with an optional fallback commands step (used if planner returns no steps) ---
+  // Apply with fallback
   async function applyWithFallback({ prompt, include_files = [], fallbackSteps = [] }) {
     const eventsEl = document.getElementById('ai2-events');
     if (eventsEl) eventsEl.value = '';
+    
     const fb = (fallbackSteps || []).filter(Boolean);
-
     const payload = {
       prompt,
       include_files,
       preview_only: false,
       return_combined_diff: false
     };
+    
     if (fb.length) {
       payload.fallback_steps = [{
         type: 'commands',
         schema: 1,
-        // omit workdir to let the server default to REPO_ROOT
         steps: fb
       }];
     }
@@ -221,16 +272,127 @@
     });
   }
 
-  // --- Attach a tiny UI helper if elements exist ---
+  // Enhanced UI helpers for loading lists
+  async function loadJobsList(state, targetId) {
+    const target = document.getElementById(targetId);
+    if (!target) return;
+    
+    try {
+      const data = await jobsList(state, 20);
+      target.innerHTML = '';
+      
+      if (!data.items || data.items.length === 0) {
+        target.innerHTML = '<li style="color:#666;padding:10px">No items</li>';
+        return;
+      }
+      
+      data.items.forEach(it => {
+        const li = document.createElement('li');
+        const date = new Date(it.mtime * 1000).toLocaleString();
+        li.innerHTML = `
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:8px">
+            <span style="font-family:monospace;font-size:12px">${it.file}</span>
+            <span style="font-size:11px;color:#888">${date}</span>
+          </div>
+        `;
+        li.style.cursor = 'pointer';
+        li.onclick = async () => {
+          try {
+            const log = await jobLog(it.file);
+            alert(typeof log === 'string' ? log : JSON.stringify(log, null, 2));
+          } catch (e) {
+            alert('Failed to load log: ' + e.message);
+          }
+        };
+        target.appendChild(li);
+      });
+    } catch (e) {
+      target.innerHTML = `<li style="color:#ef4444;padding:10px">Error: ${e.message}</li>`;
+    }
+  }
+
+  async function loadPlansList(targetId = 'ai2-plans') {
+    const target = document.getElementById(targetId);
+    if (!target) return;
+    
+    try {
+      const data = await plansList(10);
+      target.innerHTML = '';
+      
+      if (!data.items || data.items.length === 0) {
+        target.innerHTML = '<li style="color:#666;padding:10px">No plans yet</li>';
+        return;
+      }
+      
+      data.items.forEach(it => {
+        const li = document.createElement('li');
+        const id = it.file.replace(/\.json$/, '');
+        li.textContent = id;
+        li.style.cursor = 'pointer';
+        li.style.padding = '8px';
+        li.onclick = async () => {
+          try {
+            const plan = await planRead(id);
+            const el = document.getElementById('plan-json');
+            if (el) el.textContent = JSON.stringify(plan, null, 2);
+          } catch (e) {
+            alert('Failed to load plan: ' + e.message);
+          }
+        };
+        target.appendChild(li);
+      });
+    } catch (e) {
+      target.innerHTML = `<li style="color:#ef4444;padding:10px">Error: ${e.message}</li>`;
+    }
+  }
+
+  // Auto-refresh helpers
+  window.loadJobs = loadJobsList;
+  window.refreshJobs = () => {
+    loadJobsList('queue', 'jobs-queue');
+    loadJobsList('done', 'jobs-done');
+    loadJobsList('fail', 'jobs-fail');
+  };
+  window.refreshHistory = () => loadPlansList('plans');
+  window.appendLog = (x) => {
+    const t = document.getElementById('events');
+    if (t) appendLine(t, x);
+  };
+
+  // SSE runner for project page
+  window.runPlanSSE = async (payload) => {
+    return planStream({
+      ...payload,
+      idempotencyKey: IDEM(),
+      eventsTargetId: 'events'
+    });
+  };
+
+  // Export API
+  window.ai2 = {
+    planStream,
+    previewAndShowDiff,
+    applyWithFallback,
+    jobsList,
+    jobLog,
+    plansList,
+    planRead,
+    repoRead,
+    repoLs,
+    setToken,
+    getToken,
+    loadJobsList,
+    loadPlansList
+  };
+
+  // Auto-init minimal wiring
   async function initWiring() {
     const btnPlan = document.getElementById('ai2-plan-btn');
     const btnApply = document.getElementById('ai2-apply-btn');
-    const taEvents = document.getElementById('ai2-events');
     const inpPrompt = document.getElementById('ai2-prompt');
     const inpToken = document.getElementById('ai2-token');
-    const plansUl = document.getElementById('ai2-plans');
-    const jobsUl = document.getElementById('ai2-jobs');
     const taFallback = document.getElementById('ai2-fallback');
+    const taEvents = document.getElementById('ai2-events');
 
     if (inpToken) {
       inpToken.addEventListener('change', () => setToken(inpToken.value.trim()));
@@ -247,7 +409,7 @@
             include_files: ['public/index.html']
           });
         } catch (e) {
-          appendLine(taEvents, `ERROR: ${e.message}`);
+          if (taEvents) appendLine(taEvents, e.message, 'error');
         }
       });
     }
@@ -261,61 +423,24 @@
             : [];
           await applyWithFallback({
             prompt: inpPrompt.value,
-            include_files: ['public/index.html', 'public/app.ui.js'],
+            include_files: ['public/index.html'],
             fallbackSteps: fb
           });
         } catch (e) {
-          appendLine(taEvents, `ERROR: ${e.message}`);
+          if (taEvents) appendLine(taEvents, e.message, 'error');
         }
       });
     }
 
-    // simple loaders
-    async function refreshPlans() {
-      if (!plansUl) return;
-      const j = await plansList(10);
-      plansUl.innerHTML = '';
-      (j.items || []).forEach(it => {
-        const li = document.createElement('li');
-        const id = it.file.replace(/\.json$/, '');
-        li.textContent = id;
-        li.style.cursor = 'pointer';
-        li.onclick = async () => {
-          const d = await planRead(id);
-          alert(JSON.stringify(d, null, 2));
-        };
-        plansUl.appendChild(li);
-      });
+    // Auto-load lists if elements exist
+    if (document.getElementById('ai2-plans')) {
+      loadPlansList('ai2-plans').catch(console.error);
     }
-    async function refreshJobs() {
-      if (!jobsUl) return;
-      const j = await jobsList('queue', 20);
-      jobsUl.innerHTML = '';
-      (j.items || []).forEach(it => {
-        const li = document.createElement('li');
-        li.textContent = `[${new Date(it.mtime * 1000).toISOString()}] ${it.file}`;
-        jobsUl.appendChild(li);
-      });
+    if (document.getElementById('ai2-jobs')) {
+      loadJobsList('queue', 'ai2-jobs').catch(console.error);
     }
-
-    if (plansUl) refreshPlans().catch(console.error);
-    if (jobsUl) refreshJobs().catch(console.error);
   }
 
-  // expose API on window for quick hacking
-  window.ai2 = {
-    planStream,
-    previewAndShowDiff,
-    applyWithFallback,
-    jobsList,
-    jobLog,
-    plansList,
-    planRead,
-    repoRead,
-    setToken
-  };
-
-  // auto-init on DOM ready
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initWiring);
   } else {
