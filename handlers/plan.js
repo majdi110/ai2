@@ -1,7 +1,6 @@
 // handlers/plan.js
 'use strict';
 
-const url = require('url');
 const { wrap, sendJSON, readBodyLimited } = require('../utils/http');
 const { maybeBlockBrowserPost } = require('../utils/cors');
 const { MAX_PLAN_BODY_BYTES, CANONICAL_BRANCH } = require('../config/constants');
@@ -17,6 +16,9 @@ const {
   inferStepOpFromDiff
 } = require('../utils/diff');
 
+const { authCtx, allowedPrefixesFromAuth } = require('../utils/auth');
+const { rlCheck } = require('../utils/rl');
+
 function parseJSONSafe(buf) {
   try { return JSON.parse(String(buf || '{}')); }
   catch { return null; }
@@ -29,6 +31,17 @@ async function handlePlan(req, res) {
 
   // Basic browser CSRF guard (curl/tests: send X-Requested-With: ai2-ui)
   if (!maybeBlockBrowserPost(req, res)) return;
+
+  // Require auth to avoid public model burn and to scope prefixes later if needed
+  const auth = authCtx(req);
+  if (!auth || !auth.ok) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
+
+  // Simple per-IP rate limit (default 10/min; override with PLAN_RL_PER_MIN)
+  const fwd = (req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  const ip = fwd || (req.socket && req.socket.remoteAddress) || '0.0.0.0';
+  const perMin = process.env.PLAN_RL_PER_MIN ? parseInt(process.env.PLAN_RL_PER_MIN, 10) : 10;
+  const rl = rlCheck(ip, 'plan', perMin);
+  if (!rl.ok) return sendJSON(res, 429, { ok:false, error:'rate_limited', retry_after: rl.retry_after });
 
   // Read & parse request body
   let bodyBuf;
@@ -45,8 +58,13 @@ async function handlePlan(req, res) {
     return sendJSON(res, 400, { ok:false, error:'missing_prompt' });
   }
 
-  // Build effective prompt (optional context)
-  const effectivePrompt = injectContextIntoPrompt(body.prompt, String(body.context || '').trim());
+  // Scope planning to user-allowed prefixes
+  const prefixes = allowedPrefixesFromAuth(auth);
+  const extraCtx = `Allowed path prefixes:\n${prefixes.map(p => '- ' + p).join('\n')}`;
+  const effectivePrompt = injectContextIntoPrompt(
+    body.prompt,
+    [String(body.context || '').trim(), extraCtx].filter(Boolean).join('\n\n')
+  );
 
   // Call planner (with retries / CB already inside)
   let planned, usage;
@@ -68,7 +86,8 @@ async function handlePlan(req, res) {
         if (looksBinaryDiff(s.diff)) {
           return sendJSON(res, 400, { ok:false, error:'binary_diff_not_allowed' });
         }
-        const pathsOk = stepPathsUnderRepo(s.diff);
+        // Validate paths against user-scoped prefixes for parity with diff_* handlers
+        const pathsOk = stepPathsUnderRepo(s.diff, prefixes);
         if (!pathsOk.ok) {
           return sendJSON(res, 400, { ok:false, error:`diff_paths_invalid:${pathsOk.error}` });
         }

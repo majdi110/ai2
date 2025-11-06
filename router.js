@@ -33,8 +33,8 @@ function route(req, res) {
     }
   }
 
-  // ---------- DEBUG: auth ----------
-  if (req.method === 'GET' || req.method === 'HEAD') {
+  // ---------- DEBUG: auth ---------- (disabled in production)
+  if (process.env.NODE_ENV !== 'production' && (req.method === 'GET' || req.method === 'HEAD')) {
     if (pathname === '/ai2/_auth_debug' || pathname === '/_auth_debug') {
       const auth = authCtx(req);
       const allowedPrefixes = allowedPrefixesFromAuth(auth);

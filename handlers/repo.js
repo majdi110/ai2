@@ -32,10 +32,35 @@ function handleRepoLs(req,res){
       }
     })(full,0);
     return sendJSON(res,200,{ok:true,items:out});
-  }catch{ return sendJSON(res,400,{ok:false,error:'bad_path'}); }
+  }catch{
+    return sendJSON(res,400,{ok:false,error:'bad_path'});
+  }
 }
-function handleRepoRead(_req,res){ return sendJSON(res,501,{ok:false,error:'repo_read_not_implemented'}); }
-function handleRepoDownload(_req,res){ return sendJSON(res,501,{ok:false,error:'repo_download_not_implemented'}); }
+
+function handleRepoRead(req,res){
+  try {
+    const u = new URL(req.url, 'http://x');
+    const rel = String(u.searchParams.get('path') || '').trim();
+    const full = safeJoin(REPO_ROOT, rel);
+    const st = fs.statSync(full);
+    if (st.isDirectory()) {
+      return sendJSON(res, 400, { ok:false, error:'is_directory' });
+    }
+    const content = fs.readFileSync(full, 'utf8');
+    return sendJSON(res, 200, {
+      ok: true,
+      path: rel,
+      size: st.size,
+      mtime: st.mtime.toISOString(),
+      content
+    });
+  } catch (e) {
+    return sendJSON(res, 404, { ok:false, error:'not_found' });
+  }
+}
+
+function handleRepoDownload(_req,res){
+  return sendJSON(res,501,{ok:false,error:'repo_download_not_implemented'});
+}
 
 module.exports = { handleRepoLs, handleRepoRead, handleRepoDownload };
-

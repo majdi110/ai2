@@ -2,7 +2,7 @@
 'use strict';
 
 const { sendJSON, readBodyLimited, wrap } = require('../utils/http');
-const { MAX_DIFF_BYTES, CANONICAL_BRANCH } = require('../config/constants');
+const { MAX_DIFF_BYTES, CANONICAL_BRANCH, DRYRUN_RL_PER_MIN } = require('../config/constants');
 const { maybeBlockBrowserPost } = require('../utils/cors');
 const { authCtx, allowedPrefixesFromAuth } = require('../utils/auth');
 const { gitDryRun } = require('../services/git');
@@ -13,6 +13,7 @@ const {
   stepPathsUnderRepo,
   inferStepOpFromDiff,
 } = require('../utils/diff');
+const { rlCheck } = require('../utils/rl');
 
 function parseJSONSafe(buf) {
   try { return JSON.parse(String(buf || '{}')); } catch { return null; }
@@ -40,6 +41,12 @@ async function handleDiffDryRun(req, res) {
   const auth = authCtx(req);
   if (!auth || !auth.ok) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
   const prefixes = allowedPrefixesFromAuth(auth);
+
+  // Per-IP rate limit
+  const fwd = (req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  const ip = fwd || (req.socket && req.socket.remoteAddress) || '0.0.0.0';
+  const rl = rlCheck(ip, 'diff_dryrun', DRYRUN_RL_PER_MIN);
+  if (!rl.ok) return sendJSON(res, 429, { ok:false, error:'rate_limited', retry_after: rl.retry_after });
 
   let body;
   try { body = await readJsonLimited(req, MAX_DIFF_BYTES); }

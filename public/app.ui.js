@@ -1,4 +1,4 @@
-/* public/app.ui.js - Enhanced version with better UX */
+/* public/app.ui.js - Enhanced version with better UX (JSON plan, no SSE) */
 (() => {
   const API = (window.AI2_API_BASE || '/ai2').replace(/\/+$/, '');
   const TOKEN_KEY = 'ai2_token';
@@ -40,9 +40,9 @@
       'warn': '⚠️',
       'progress': '⏳'
     }[type] || '•';
-    
+
     const formattedLine = `[${timestamp}] ${prefix} ${line}`;
-    
+
     if (el.tagName === 'TEXTAREA') {
       el.value += formattedLine + '\n';
       el.scrollTop = el.scrollHeight;
@@ -52,52 +52,7 @@
     }
   }
 
-  // SSE over fetch with enhanced error handling
-  async function fetchSSE(url, { method = 'POST', headers = {}, bodyObj = {}, onEvent } = {}) {
-    const res = await fetch(url, {
-      method,
-      headers: {
-        'Accept': 'text/event-stream',
-        'Content-Type': 'application/json',
-        ...headers
-      },
-      body: JSON.stringify(bodyObj)
-    });
-
-    if (!res.ok) {
-      const txt = await res.text().catch(() => '');
-      throw new Error(`HTTP ${res.status}: ${txt.slice(0, 300)}`);
-    }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-
-      let idx;
-      while ((idx = buf.indexOf('\n\n')) !== -1) {
-        const frame = buf.slice(0, idx).trim();
-        buf = buf.slice(idx + 2);
-        
-        const dataLine = frame.split('\n').find(l => l.startsWith('data: '));
-        if (!dataLine) continue;
-        
-        const jsonStr = dataLine.slice(6);
-        try {
-          const evt = JSON.parse(jsonStr);
-          if (typeof onEvent === 'function') onEvent(evt);
-        } catch (e) {
-          console.warn('SSE parse error', e, frame.slice(0, 100));
-        }
-      }
-    }
-  }
-
-  // Plan with streaming and better event handling
+  // Plan using plain JSON (no SSE)
   async function planStream({
     prompt,
     include_files = [],
@@ -120,41 +75,43 @@
     const target = eventsTargetId ? document.getElementById(eventsTargetId) : null;
     const seen = [];
 
-    function handle(evt) {
+    function emit(evt) {
       seen.push(evt);
-      
-      // Enhanced event display
+
+      // Enhanced event display (synthetic since no SSE)
       if (target) {
-        const type = evt.event === 'error' ? 'error' : 
-                     evt.event === 'final' ? 'success' :
-                     evt.event === 'thinking' ? 'progress' : 'info';
-        
+        const type = evt.event === 'error' ? 'error' :
+                     evt.event === 'final' ? 'success' : 'info';
         let msg = '';
-        if (evt.event === 'thinking') msg = 'AI is thinking...';
-        else if (evt.event === 'planning') msg = 'Generating plan...';
-        else if (evt.event === 'validating') msg = 'Validating changes...';
-        else if (evt.event === 'queued') msg = `Queued: ${evt.job || 'job'}`;
-        else if (evt.event === 'final') msg = 'Plan completed!';
+        if (evt.event === 'final') msg = 'Plan completed!';
         else if (evt.event === 'error') msg = `Error: ${evt.message || 'Unknown error'}`;
         else msg = JSON.stringify(evt);
-        
         appendLine(target, msg, type);
       }
-      
-      // Progress callback
-      if (onProgress && evt.event) {
-        onProgress(evt);
-      }
-      
-      // User callback
+
+      if (onProgress && evt.event) onProgress(evt);
       if (onEvent) onEvent(evt);
     }
 
-    await fetchSSE(`${API}/plan?stream=1`, {
-      headers: authHeaders({ 'X-Idempotency-Key': idempotencyKey }),
-      bodyObj: body,
-      onEvent: handle
+    const res = await fetch(`${API}/plan`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Idempotency-Key': idempotencyKey,
+        ...authHeaders()
+      },
+      body: JSON.stringify(body)
     });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      const errEvt = { event: 'error', status: res.status, message: txt.slice(0, 300) };
+      emit(errEvt);
+      throw new Error(`HTTP ${res.status}: ${txt}`);
+    }
+
+    const evt = await res.json();
+    emit({ event: 'final', ...evt });
 
     return seen;
   }
@@ -233,7 +190,7 @@
       if (diffEl) diffEl.textContent = '(no plan id from preview)';
       return;
     }
-    
+
     try {
       const j = await planRead(finalPlanId);
       const p = j && (j.plan || j);
@@ -248,7 +205,7 @@
   async function applyWithFallback({ prompt, include_files = [], fallbackSteps = [] }) {
     const eventsEl = document.getElementById('ai2-events');
     if (eventsEl) eventsEl.value = '';
-    
+
     const fb = (fallbackSteps || []).filter(Boolean);
     const payload = {
       prompt,
@@ -256,7 +213,7 @@
       preview_only: false,
       return_combined_diff: false
     };
-    
+
     if (fb.length) {
       payload.fallback_steps = [{
         type: 'commands',
@@ -276,16 +233,16 @@
   async function loadJobsList(state, targetId) {
     const target = document.getElementById(targetId);
     if (!target) return;
-    
+
     try {
       const data = await jobsList(state, 20);
       target.innerHTML = '';
-      
+
       if (!data.items || data.items.length === 0) {
         target.innerHTML = '<li style="color:#666;padding:10px">No items</li>';
         return;
       }
-      
+
       data.items.forEach(it => {
         const li = document.createElement('li');
         const date = new Date(it.mtime * 1000).toLocaleString();
@@ -314,16 +271,16 @@
   async function loadPlansList(targetId = 'ai2-plans') {
     const target = document.getElementById(targetId);
     if (!target) return;
-    
+
     try {
       const data = await plansList(10);
       target.innerHTML = '';
-      
+
       if (!data.items || data.items.length === 0) {
         target.innerHTML = '<li style="color:#666;padding:10px">No plans yet</li>';
         return;
       }
-      
+
       data.items.forEach(it => {
         const li = document.createElement('li');
         const id = it.file.replace(/\.json$/, '');
@@ -359,7 +316,7 @@
     if (t) appendLine(t, x);
   };
 
-  // SSE runner for project page
+  // JSON runner for project page (keeps same API)
   window.runPlanSSE = async (payload) => {
     return planStream({
       ...payload,
