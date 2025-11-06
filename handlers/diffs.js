@@ -3,16 +3,20 @@
 
 const { sendJSON, readBodyLimited, wrap } = require('../utils/http');
 const { MAX_DIFF_BYTES, CANONICAL_BRANCH } = require('../config/constants');
+const { maybeBlockBrowserPost } = require('../utils/cors');
+const { authCtx, allowedPrefixesFromAuth } = require('../utils/auth');
 const { gitDryRun } = require('../services/git');
 const { enqueuePatchJob } = require('../services/queue');
 const {
-  normalizeDiff,
+  normalizeDiff, // kept for parity with existing utils import set
   looksBinaryDiff,
   stepPathsUnderRepo,
   inferStepOpFromDiff,
 } = require('../utils/diff');
 
-function parseJSONSafe(buf) { try { return JSON.parse(String(buf || '{}')); } catch { return null; } }
+function parseJSONSafe(buf) {
+  try { return JSON.parse(String(buf || '{}')); } catch { return null; }
+}
 
 // Small fixups on common planner spacing glitches
 function sanitizeDiff(diff) {
@@ -30,6 +34,12 @@ async function readJsonLimited(req, limit) {
 async function handleDiffDryRun(req, res) {
   wrap(res, 'diff_dryrun');
   if (req.method !== 'POST') { res.statusCode = 405; return res.end(); }
+  if (!maybeBlockBrowserPost(req, res)) return;
+
+  // Require auth and use per-token allowed prefixes
+  const auth = authCtx(req);
+  if (!auth || !auth.ok) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
+  const prefixes = allowedPrefixesFromAuth(auth);
 
   let body;
   try { body = await readJsonLimited(req, MAX_DIFF_BYTES); }
@@ -40,7 +50,7 @@ async function handleDiffDryRun(req, res) {
   if (Buffer.byteLength(diff, 'utf8') > MAX_DIFF_BYTES) return sendJSON(res, 413, { ok:false, error:'payload_too_large' });
   if (looksBinaryDiff(diff)) return sendJSON(res, 400, { ok:false, error:'binary_diff_not_allowed' });
 
-  const pathsOk = stepPathsUnderRepo(diff);
+  const pathsOk = stepPathsUnderRepo(diff, prefixes);
   if (!pathsOk.ok) return sendJSON(res, 400, { ok:false, error:`diff_paths_invalid:${pathsOk.error}` });
 
   const branch = String(body.base_branch || CANONICAL_BRANCH);
@@ -53,23 +63,29 @@ async function handleDiffDryRun(req, res) {
 async function handleDiffSubmit(req, res) {
   wrap(res, 'diff_submit');
   if (req.method !== 'POST') { res.statusCode = 405; return res.end(); }
+  if (!maybeBlockBrowserPost(req, res)) return;
+
+  // Require auth and use per-token allowed prefixes
+  const auth = authCtx(req);
+  if (!auth || !auth.ok) return sendJSON(res, 401, { ok:false, error:'unauthorized' });
+  const prefixes = allowedPrefixesFromAuth(auth);
 
   let body;
   try { body = await readJsonLimited(req, MAX_DIFF_BYTES); }
   catch (e) { return sendJSON(res, e.code === 413 ? 413 : 400, { ok:false, error:String(e.code||'bad_request') }); }
 
-  let diff = sanitizeDiff((body && body.diff) || '');
+  const diff = sanitizeDiff((body && body.diff) || '');
   if (!diff) return sendJSON(res, 400, { ok:false, error:'missing_diff' });
   if (Buffer.byteLength(diff, 'utf8') > MAX_DIFF_BYTES) return sendJSON(res, 413, { ok:false, error:'payload_too_large' });
   if (looksBinaryDiff(diff)) return sendJSON(res, 400, { ok:false, error:'binary_diff_not_allowed' });
 
-  const pathsOk = stepPathsUnderRepo(diff);
+  const pathsOk = stepPathsUnderRepo(diff, prefixes);
   if (!pathsOk.ok) return sendJSON(res, 400, { ok:false, error:`diff_paths_invalid:${pathsOk.error}` });
 
   const branch  = String(body.base_branch || CANONICAL_BRANCH);
   const message = String(body.message || 'Apply AI2 plan');
   const idemVal = String(body.idempotency_key || '');
-  const reqInfo = { ip: req.socket && req.socket.remoteAddress || '' };
+  const reqInfo = { ip: (req.socket && req.socket.remoteAddress) || '' };
 
   // Server-side guard: repeat the dry-run; DO NOT enqueue on failure.
   const dry = await gitDryRun(diff, branch);
