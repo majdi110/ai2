@@ -2,7 +2,7 @@
 'use strict';
 
 const { sendJSON, readBodyLimited, wrap } = require('../utils/http');
-const { MAX_DIFF_BYTES, CANONICAL_BRANCH, DRYRUN_RL_PER_MIN } = require('../config/constants');
+const { MAX_DIFF_BYTES, CANONICAL_BRANCH, DRYRUN_RL_PER_MIN, DRYRUN_KEY } = require('../config/constants');
 const { maybeBlockBrowserPost } = require('../utils/cors');
 const { authCtx, allowedPrefixesFromAuth } = require('../utils/auth');
 const { gitDryRun } = require('../services/git');
@@ -36,6 +36,12 @@ async function handleDiffDryRun(req, res) {
   wrap(res, 'diff_dryrun');
   if (req.method !== 'POST') { res.statusCode = 405; return res.end(); }
   if (!maybeBlockBrowserPost(req, res)) return;
+
+  // Optional guard: require configured dry-run key
+  const presented = String(req.headers['x-dryrun-key'] || '').trim();
+  if (DRYRUN_KEY && presented !== DRYRUN_KEY) {
+    return sendJSON(res, 401, { ok:false, error:'dryrun_key_required' });
+  }
 
   // Require auth and use per-token allowed prefixes
   const auth = authCtx(req);
