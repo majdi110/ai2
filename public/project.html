@@ -41,6 +41,14 @@
   .tab.active{background:#161626}
   .tabpanes>div{display:none}
   .tabpanes>div.active{display:block}
+  /* File explorer + editor */
+  .columns{display:grid;grid-template-columns:280px 1fr;gap:10px}
+  .tree{max-height:420px;overflow:auto;border:1px solid var(--br);border-radius:10px;background:#0f0f16;padding:8px}
+  .tree button{all:unset;cursor:pointer;color:#cbd5ff}
+  .tree li{margin:4px 0;padding:4px 6px;border-radius:8px}
+  .tree li.active{background:#17172a}
+  .editor{display:flex;flex-direction:column;gap:8px}
+  .editor textarea{min-height:320px}
 </style>
 </head>
 <body>
@@ -88,22 +96,42 @@
         <div style="display:flex;align-items:flex-end;gap:8px">
           <button id="saveProject">Save Project</button>
           <button id="openStatic">Open</button>
+          <button id="refreshPreview">Refresh</button>
         </div>
       </div>
       <div class="tiny" id="projectStatus">Project stored at <code>public/users/&lt;userId&gt;/projects/&lt;projectId&gt;.json</code></div>
     </div>
   </section>
 
-  <!-- Files manifest -->
+  <!-- Files: Explorer + Editor -->
   <section class="card">
-    <div class="head">Project Files (manifest)</div>
+    <div class="head">Project Files</div>
     <div class="body">
-      <div class="toolbar">
-        <button id="saveFiles">Save files.json</button>
-        <span class="muted">Add paths manually or let generator fill them.</span>
+      <div class="columns">
+        <div>
+          <div class="toolbar" style="justify-content:space-between">
+            <span class="muted">App root:</span>
+            <code id="appRootCode"></code>
+          </div>
+          <ul id="fileTree" class="tree"></ul>
+          <div class="toolbar" style="margin-top:8px">
+            <input id="newFileName" placeholder="newfile.html" style="flex:1"/>
+            <button id="createFile">Create</button>
+          </div>
+        </div>
+        <div class="editor">
+          <label class="muted">Editor</label>
+          <div class="row" style="justify-content:space-between">
+            <code id="currentFile">(none)</code>
+            <div class="row">
+              <button id="saveFile">Save</button>
+              <button id="deleteFile">Delete</button>
+            </div>
+          </div>
+          <textarea id="editorBox" placeholder="Select a file to edit…"></textarea>
+          <div class="tiny" id="editorStatus">Ready</div>
+        </div>
       </div>
-      <textarea id="filesBox" placeholder='["users/u1/projects/p1/app/index.html"]'></textarea>
-      <div class="tiny" id="filesStatus">Stored at <code>public/users/&lt;userId&gt;/projects/&lt;projectId&gt;/files.json</code></div>
     </div>
   </section>
 
@@ -231,6 +259,7 @@ function refreshPreview(){
   const rel = start.startsWith('public/') ? start : `public/${start}`;
   iframe.src = `/ai2/static/${rel}`;
 }
+document.querySelector('#refreshPreview').onclick = refreshPreview;
 
 function appendLog(x){ const t=document.querySelector('#events'); t.value += x+'\n'; t.scrollTop=t.scrollHeight; } // minimal helper for SSE logs
 window.appendLog = appendLog; // expose (the app.ui.js snippets call it)
@@ -243,6 +272,108 @@ window.refreshHistory = refreshHistory;
 refreshPreview();
 refreshJobs();
 refreshHistory();
+
+/* --------- File explorer + editor wiring --------- */
+(function initExplorer(){
+  const appRoot = `users/${userId}/projects/${projectId}/app`;
+  document.getElementById('appRootCode').textContent = appRoot;
+  const tree = document.getElementById('fileTree');
+  const editor = document.getElementById('editorBox');
+  const cur = document.getElementById('currentFile');
+  const status = document.getElementById('editorStatus');
+  let selected = null;
+
+  function renderTree(items) {
+    tree.innerHTML = '';
+    // Show only files within appRoot
+    const inside = items.filter(it => it.rel.startsWith(`public/${appRoot}/`));
+    const rels = inside.map(it => it.rel.replace(/^public\//,''));
+    rels.sort();
+    for (const r of rels) {
+      const li = document.createElement('li');
+      li.dataset.path = r;
+      li.className = 'file';
+      const btn = document.createElement('button');
+      btn.textContent = r.replace(`${appRoot}/`, '');
+      btn.onclick = async () => {
+        document.querySelectorAll('.tree li').forEach(n => n.classList.remove('active'));
+        li.classList.add('active');
+        selected = r;
+        cur.textContent = r;
+        status.textContent = 'Loading…';
+        try {
+          const j = await ai2.fsRead(r);
+          editor.value = j.content ?? '';
+          status.textContent = `Opened (${j.size} bytes)`;
+          // auto-set preview start if it's index.html
+          if (r.endsWith('index.html')) {
+            document.getElementById('startPath').value = r;
+            refreshPreview();
+          }
+        } catch(e) {
+          status.textContent = 'Error: ' + e.message;
+        }
+      };
+      li.appendChild(btn);
+      tree.appendChild(li);
+    }
+  }
+
+  async function loadTree() {
+    try {
+      const j = await ai2.fsLs(appRoot, 4);
+      if (!j?.ok) throw new Error('ls failed');
+      renderTree(j.items || []);
+    } catch(e) {
+      tree.innerHTML = `<li class="muted">Error: ${e.message}</li>`;
+    }
+  }
+
+  document.getElementById('createFile').onclick = async () => {
+    const name = document.getElementById('newFileName').value.trim();
+    if (!name) return;
+    const rel = `${appRoot}/${name}`;
+    try {
+      await ai2.fsWrite(rel, '');
+      document.getElementById('newFileName').value = '';
+      await loadTree();
+      document.querySelector(\`.tree li[data-path="\${rel}"] button\`)?.click();
+      status.textContent = 'Created ✓';
+    } catch(e) {
+      status.textContent = 'Error: ' + e.message;
+    }
+  };
+
+  document.getElementById('saveFile').onclick = async () => {
+    if (!selected) { status.textContent = 'Pick a file first'; return; }
+    try {
+      await ai2.fsWrite(selected, editor.value);
+      status.textContent = 'Saved ✓';
+      // if editing current start file, refresh preview
+      const start = document.getElementById('startPath').value.trim();
+      if (start && (start === selected || \`public/\${start}\` === selected)) {
+        refreshPreview();
+      }
+    } catch(e) {
+      status.textContent = 'Error: ' + e.message;
+    }
+  };
+
+  document.getElementById('deleteFile').onclick = async () => {
+    if (!selected) { status.textContent = 'Pick a file first'; return; }
+    if (!confirm(\`Delete \${selected}?\`)) return;
+    try {
+      await ai2.fsDelete(selected);
+      selected = null; cur.textContent = '(none)'; editor.value = '';
+      status.textContent = 'Deleted ✓';
+      await loadTree();
+    } catch(e) {
+      status.textContent = 'Error: ' + e.message;
+    }
+  };
+
+  loadTree().catch(console.error);
+})();
 </script>
 </body>
 </html>

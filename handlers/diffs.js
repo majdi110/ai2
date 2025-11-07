@@ -37,7 +37,7 @@ async function handleDiffDryRun(req, res) {
   if (req.method !== 'POST') { res.statusCode = 405; return res.end(); }
   if (!maybeBlockBrowserPost(req, res)) return;
 
-  // Optional guard: require configured dry-run key
+  // Require the configured dry-run key if set
   const presented = String(req.headers['x-dryrun-key'] || '').trim();
   if (DRYRUN_KEY && presented !== DRYRUN_KEY) {
     return sendJSON(res, 401, { ok:false, error:'dryrun_key_required' });

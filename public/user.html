@@ -15,7 +15,7 @@
   .wrap{max-width:1200px;margin:24px auto;padding:0 16px;display:grid;gap:16px;grid-template-columns:1fr 1fr}
   .card{background:var(--panel);border:1px solid var(--br);border-radius:14px;padding:16px}
   label{display:block;color:var(--muted);font-size:12px;margin:8px 0 6px}
-  input{width:100%;padding:12px;border-radius:10px;border:1px solid var(--br);background:#0f0f16;color:var(--text)}
+  input{width:100%;padding:12px;border-radius:10px;border:1px solid var(--br);background:#0f0f16;color:#var(--text)}
   button{background:linear-gradient(135deg,var(--pri),var(--pri2));color:#fff;border:0;border-radius:12px;padding:10px 14px;font-weight:700;cursor:pointer}
   .tiny{font-size:12px;margin-top:8px;color:var(--muted)}
   .tiny.ok{color:var(--ok)} .tiny.err{color:var(--err)}
@@ -78,8 +78,24 @@ const qp = new URLSearchParams(location.search);
 const userId = qp.get('userId') || (JSON.parse(localStorage.getItem('ai2_user')||'{}').userId || 'u1');
 $('#userId').value = userId;
 
-const ENV = JSON.parse(localStorage.getItem('ai2_env')||'{}');
-$('#envHint').textContent = ENV.API_BASE ? new URL(ENV.API_BASE).host : 'no API';
+// Load env and set safe defaults for same-origin usage
+const ENV_RAW = JSON.parse(localStorage.getItem('ai2_env')||'{}');
+const ENV = {
+  API_BASE: (ENV_RAW.API_BASE || '/ai2').replace(/\/+$/,''),
+  API_TOKEN: ENV_RAW.API_TOKEN || '',
+  DRYRUN_KEY: ENV_RAW.DRYRUN_KEY || '',
+  BASE_BRANCH: ENV_RAW.BASE_BRANCH || 'public'
+};
+$('#envHint').textContent = (ENV.API_BASE.startsWith('http')
+  ? new URL(ENV.API_BASE).host
+  : location.host);
+
+// Common auth headers (CSRF guard + optional bearer)
+function authHeaders(extra = {}) {
+  const h = { 'X-Requested-With': 'ai2-ui', ...extra };
+  if (ENV.API_TOKEN) h['Authorization'] = `Bearer ${ENV.API_TOKEN}`;
+  return h;
+}
 
 /* JSON helpers */
 async function getJSON(path){
@@ -112,25 +128,31 @@ function replaceFileDiff(path, oldContent, newContent){
 @@ -1,${A.length} +1,${B.length} @@
 ${body}`;
 }
+
 async function dryrun(diff){
-  const base = (ENV.API_BASE||'').replace(/\/+$/,'');
-  const headers = {'Content-Type':'application/json'};
-  if(ENV.DRYRUN_KEY) headers['X-Dryrun-Key'] = ENV.DRYRUN_KEY;
-  const r = await fetch(`${base}/diff_dryrun`,{method:'POST',headers,body:JSON.stringify({diff,base_branch:ENV.BASE_BRANCH||'public'})});
+  const base = ENV.API_BASE;
+  const headers = authHeaders({'Content-Type':'application/json'});
+  if (ENV.DRYRUN_KEY) headers['X-Dryrun-Key'] = ENV.DRYRUN_KEY;
+  const r = await fetch(`${base}/diff_dryrun`, {
+    method:'POST',
+    headers,
+    body: JSON.stringify({ diff, base_branch: ENV.BASE_BRANCH })
+  });
   const t = await r.text(); let j; try{ j = t ? JSON.parse(t):null; }catch{}
   if(!r.ok || (j && j.ok===false)){ const msg=(j && (j.detail||j.error))||t||`HTTP ${r.status}`; const e=new Error(msg); e._dryrun=true; throw e;}
   return j||{ok:true};
 }
+
 async function applyPlan(patch){
-  const base = (ENV.API_BASE||'').replace(/\/+$/,'');
-  const headers = {'Content-Type':'application/json','X-Idempotency-Key':'ui-'+Date.now()};
-  if(ENV.API_TOKEN) headers.Authorization = 'Bearer '+ENV.API_TOKEN;
+  const base = ENV.API_BASE;
+  const headers = authHeaders({'Content-Type':'application/json','X-Idempotency-Key':'ui-'+Date.now()});
   const body = {
-    prompt:`Apply EXACTLY this unified diff to the repo (base branch ${(ENV.BASE_BRANCH||'public')}).
+    prompt:`Apply EXACTLY this unified diff to the repo (base branch ${ENV.BASE_BRANCH}).
 
 ${patch}
 `,
-    preview_only:false, return_combined_diff:true
+    preview_only:false,
+    return_combined_diff:true
   };
   const r = await fetch(`${base}/plan`,{method:'POST',headers,body:JSON.stringify(body)});
   const t = await r.text(); let j; try{ j=JSON.parse(t);}catch{}
@@ -151,8 +173,7 @@ async function init(){
   prof = await getJSON(paths.profile);
   if(prof){ $('#name').value=prof.name||''; $('#email').value=prof.email||''; }
   const list = await getJSON(paths.projIndex);
-  idx = Array.isArray(list)?list:[];
-  renderProjects(idx);
+  idx = Array.isArray(list)?list:[]; renderProjects(idx);
 }
 init();
 
@@ -200,7 +221,7 @@ $('#addProject').onclick = async ()=>{
     idx = nextIdx; renderProjects(idx);
     $('#newProjectName').value = '';
     $('#statusProjects').textContent='Project added ✓'; $('#statusProjects').className='tiny ok';
-  }catch(e){ $('#statusProjects').textContent='Error: '+e.message; $('#statusProjects').className='tiny err'; }
+  }catch(e){ $('#statusProjects').textContent='Error: ' + e.message; $('#statusProjects').className='tiny err'; }
 };
 
 $('#logout').onclick = ()=>{ localStorage.removeItem('ai2_user'); location.href='./login.html'; };

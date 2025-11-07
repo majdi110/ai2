@@ -1,0 +1,39 @@
+<!doctype html>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>AI2 • Login</title>
+<style>
+  body{margin:0;display:grid;place-items:center;min-height:100vh;background:#0b0b10;color:#e9ecf2;font:14px system-ui}
+  .card{width:min(540px,92vw);background:#14141c;border:1px solid #262636;border-radius:16px;padding:22px}
+  label{display:block;margin:.6rem 0 .25rem;color:#96a0ad;font-size:12px}
+  input{width:100%;padding:12px;border-radius:10px;border:1px solid #262636;background:#0f0f16;color:#e9ecf2}
+  button{width:100%;margin-top:12px;padding:12px;border:0;border-radius:12px;background:linear-gradient(135deg,#7c5cff,#6aa4ff);color:#fff;font-weight:700;cursor:pointer}
+  .muted{color:#96a0ad;font-size:12px;margin-top:8px}
+</style>
+<div class="card">
+  <h2 style="margin:0 0 8px">Sign in</h2>
+  <p class="muted">Enter API details and your user id</p>
+  <label>API Base</label>
+  <input id="apiBase" placeholder="https://datav.belocloud.com/ai2" />
+  <label>API Token (Bearer)</label>
+  <input id="apiToken" type="password" placeholder="tok_..." />
+  <label>Username (userId)</label>
+  <input id="userId" placeholder="u1" />
+  <button id="go">Continue</button>
+  <div id="msg" class="muted"></div>
+</div>
+<script src="./ui.js"></script>
+<script>
+const msg = q('#msg');
+q('#apiBase').value = (loadEnv().API_BASE || 'https://datav.belocloud.com/ai2');
+q('#go').onclick = async () => {
+  const env = {
+    API_BASE: q('#apiBase').value.trim().replace(/\/+$/,''),
+    API_TOKEN: q('#apiToken').value.trim()
+  };
+  const userId = q('#userId').value.trim() || 'u1';
+  saveEnv(env);
+  msg.textContent = 'Saved. Redirecting...';
+  location.href = `./user.html?userId=${encodeURIComponent(userId)}`;
+};
+</script>

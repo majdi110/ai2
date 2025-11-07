@@ -29,6 +29,44 @@
     return h;
   }
 
+  // ---------- FS helpers (auth required) ----------
+  async function fsLs(pathRel, depth = 2) {
+    const u = new URL(`${API}/_fs/ls`, location.origin);
+    u.searchParams.set('path', pathRel || '');
+    u.searchParams.set('depth', String(depth));
+    const r = await fetch(u.toString(), { headers: authHeaders() });
+    if (!r.ok) throw new Error(`fsLs ${r.status}`);
+    return r.json();
+  }
+  async function fsRead(pathRel) {
+    const u = new URL(`${API}/_fs/read`, location.origin);
+    u.searchParams.set('path', pathRel || '');
+    const r = await fetch(u.toString(), { headers: authHeaders() });
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j?.ok) throw new Error(j?.error || `fsRead ${r.status}`);
+    return j;
+  }
+  async function fsWrite(pathRel, content) {
+    const r = await fetch(`${API}/_fs/write`, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ path: pathRel, content })
+    });
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j?.ok) throw new Error(j?.error || `fsWrite ${r.status}`);
+    return j;
+  }
+  async function fsDelete(pathRel) {
+    const r = await fetch(`${API}/_fs/delete`, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ path: pathRel })
+    });
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j?.ok) throw new Error(j?.error || `fsDelete ${r.status}`);
+    return j;
+  }
+
   // Enhanced event logging
   function appendLine(el, line, type = 'info') {
     if (!el) return;
@@ -339,7 +377,9 @@
     setToken,
     getToken,
     loadJobsList,
-    loadPlansList
+    loadPlansList,
+    // expose FS helpers
+    fsLs, fsRead, fsWrite, fsDelete
   };
 
   // Auto-init minimal wiring

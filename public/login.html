@@ -1,231 +1,64 @@
+<!-- public/login.html -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>AI2 • Sign In</title>
 <style>
-:root{
-  --bg:#0a0a0f;--panel:#16161f;--panel-light:#1c1c28;--muted:#8b92a8;--text:#e8eaf0;
-  --pri:#7c5cff;--pri-hover:#8d6fff;--sec:#6aa4ff;--ok:#22c55e;--warn:#f59e0b;--err:#ef4444;
-  --br:#262636;--br-light:#32323f;--accent:#a78bfa;
-}
-*{box-sizing:border-box;margin:0;padding:0}
-body{
-  background:linear-gradient(135deg,#0a0a0f 0%,#14141f 100%);
-  color:var(--text);font:14px/1.6 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Oxygen,Ubuntu,sans-serif;
-  min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;
-}
-.container{max-width:580px;width:100%;animation:fadeIn 0.4s ease-out}
-@keyframes fadeIn{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
-.logo{text-align:center;margin-bottom:32px}
-.logo h1{font-size:32px;font-weight:800;background:linear-gradient(135deg,var(--pri),var(--sec));
-  -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin-bottom:8px}
-.logo p{color:var(--muted);font-size:15px}
-.card{background:var(--panel);border:1px solid var(--br);border-radius:16px;padding:28px;margin-bottom:20px;
-  box-shadow:0 8px 32px rgba(0,0,0,0.3);backdrop-filter:blur(10px)}
-.card h2{font-size:18px;margin-bottom:6px;color:var(--text)}
-.card-desc{color:var(--muted);font-size:13px;margin-bottom:20px;line-height:1.5}
-.form-group{margin-bottom:18px}
-.form-group label{display:block;font-size:13px;font-weight:600;color:var(--muted);margin-bottom:8px;
-  text-transform:uppercase;letter-spacing:0.3px}
-.form-group input{width:100%;padding:12px 14px;border-radius:10px;border:1px solid var(--br);
-  background:var(--panel-light);color:var(--text);font-size:14px;transition:all 0.2s}
-.form-group input:focus{outline:none;border-color:var(--pri);box-shadow:0 0 0 3px rgba(124,92,255,0.1)}
-.form-group input::placeholder{color:#5a5f72}
-.grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
-.btn{background:linear-gradient(135deg,var(--pri),var(--sec));color:#fff;border:0;border-radius:12px;
-  padding:14px 24px;font-weight:700;font-size:14px;cursor:pointer;transition:all 0.2s;
-  box-shadow:0 4px 16px rgba(124,92,255,0.3);width:100%;position:relative;overflow:hidden}
-.btn:hover{transform:translateY(-2px);box-shadow:0 6px 24px rgba(124,92,255,0.4)}
-.btn:active{transform:translateY(0)}
-.btn:disabled{opacity:0.5;cursor:not-allowed}
-.btn::before{content:'';position:absolute;top:0;left:-100%;width:100%;height:100%;
-  background:linear-gradient(90deg,transparent,rgba(255,255,255,0.2),transparent);transition:left 0.5s}
-.btn:hover::before{left:100%}
-.status{margin-top:12px;padding:10px 14px;border-radius:8px;font-size:13px;font-weight:600;
-  display:none;animation:slideIn 0.3s ease-out}
-@keyframes slideIn{from{opacity:0;transform:translateX(-10px)}to{opacity:1;transform:translateX(0)}}
-.status.show{display:block}
-.status.ok{background:rgba(34,197,94,0.15);color:var(--ok);border:1px solid rgba(34,197,94,0.3)}
-.status.err{background:rgba(239,68,68,0.15);color:var(--err);border:1px solid rgba(239,68,68,0.3)}
-.info-box{background:var(--panel-light);border:1px solid var(--br-light);border-radius:8px;
-  padding:12px 14px;margin-top:16px;font-size:12px;color:var(--muted);line-height:1.5}
-.info-box code{background:rgba(124,92,255,0.15);color:var(--accent);padding:2px 6px;
-  border-radius:4px;font-family:ui-monospace,Menlo,Monaco,Consolas,monospace;font-size:11px}
-.toggle-section{margin-top:16px;padding-top:16px;border-top:1px solid var(--br)}
-.toggle-btn{background:transparent;color:var(--pri);border:1px solid var(--br);padding:10px 16px;
-  border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;transition:all 0.2s;width:100%}
-.toggle-btn:hover{background:var(--panel-light);border-color:var(--pri)}
-.advanced{display:none;margin-top:16px}
-.advanced.show{display:block;animation:fadeIn 0.3s ease-out}
-.icon{display:inline-block;width:20px;height:20px;margin-right:8px;vertical-align:middle}
-.spinner{border:2px solid var(--br);border-top:2px solid var(--pri);border-radius:50%;
-  width:16px;height:16px;animation:spin 0.8s linear infinite;display:inline-block;margin-right:8px}
-@keyframes spin{to{transform:rotate(360deg)}}
+:root{--bg:#0b0b10;--panel:#15151f;--muted:#96a0ad;--text:#e9ecf2;--br:#25263a;--pri:#7c5cff;--pri2:#6aa4ff;}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,Segoe UI,Roboto,Ubuntu,sans-serif;display:grid;place-items:center;min-height:100vh}
+.card{width:min(720px,92vw);background:var(--panel);border:1px solid var(--br);border-radius:16px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+h1{margin:0 0 4px;font-size:22px}
+p.muted{color:var(--muted);margin:0 0 14px}
+.grid{display:grid;gap:12px;grid-template-columns:1fr 1fr}
+label{font-size:12px;color:var(--muted);display:block;margin:8px 0 6px}
+input{width:100%;padding:12px;border-radius:10px;border:1px solid var(--br);background:#0f0f16;color:var(--text)}
+.row{display:flex;gap:10px;align-items:center}
+button{background:linear-gradient(135deg,var(--pri),var(--pri2));color:#fff;border:0;border-radius:12px;padding:12px 16px;font-weight:700;cursor:pointer}
+.hint{font-size:12px;color:var(--muted);margin-top:6px}
+.ok{color:#22c55e}.err{color:#ef4444}
 </style>
 </head>
 <body>
-<div class="container">
-  <div class="logo">
-    <h1>🚀 AI2 Builder</h1>
-    <p>AI-Powered Web Application Development Platform</p>
-  </div>
+<div class="card">
+<h1>🚀 AI2 Builder — Sign In</h1>
+<p class="muted">Connect to your AI2 gateway and choose a user.</p>
 
-  <div class="card">
-    <h2>Connection Settings</h2>
-    <p class="card-desc">Configure your API endpoint and authentication credentials</p>
-    
-    <div class="grid">
-      <div class="form-group">
-        <label>API Endpoint</label>
-        <input id="apiBase" type="url" placeholder="https://datav.belocloud.com/ai2" />
-      </div>
-      <div class="form-group">
-        <label>API Token</label>
-        <input id="apiToken" type="password" placeholder="Bearer token (optional)" />
-      </div>
-    </div>
 
-    <div class="toggle-section">
-      <button class="toggle-btn" id="advancedToggle">⚙️ Advanced Settings</button>
-      <div class="advanced" id="advancedSettings">
-        <div class="grid">
-          <div class="form-group">
-            <label>Dry-run Key</label>
-            <input id="dryrunKey" type="password" placeholder="X-Dryrun-Key" />
-          </div>
-          <div class="form-group">
-            <label>Base Branch</label>
-            <input id="baseBranch" value="public" />
-          </div>
-        </div>
-      </div>
-    </div>
-    
-    <div class="info-box">
-      💡 Your connection settings are stored locally in <code>localStorage.ai2_env</code>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2>User Profile</h2>
-    <p class="card-desc">Create or sign in to your development account</p>
-    
-    <div class="form-group">
-      <label>User ID</label>
-      <input id="userId" placeholder="e.g. u1" />
-    </div>
-    
-    <div class="grid">
-      <div class="form-group">
-        <label>Display Name</label>
-        <input id="name" placeholder="Your name" />
-      </div>
-      <div class="form-group">
-        <label>Email Address</label>
-        <input id="email" type="email" placeholder="you@example.com" />
-      </div>
-    </div>
-
-    <button class="btn" id="save">
-      <span id="btnText">Sign In & Continue</span>
-    </button>
-
-    <div id="status" class="status"></div>
-
-    <div class="info-box">
-      📁 Profile saved to <code>public/users/&lt;userId&gt;/profile.json</code>
-    </div>
-  </div>
+<div class="grid">
+<div>
+<label>API Endpoint</label>
+<input id="apiBase" type="url" placeholder="https://datav.belocloud.com/ai2" />
+</div>
+<div>
+<label>API Token (Bearer)</label>
+<input id="apiToken" type="password" placeholder="tok_…" />
+</div>
+<div>
+<label>Dry-run Key</label>
+<input id="dryrunKey" type="password" placeholder="X-Dryrun-Key" />
+</div>
+<div>
+<label>Base Branch</label>
+<input id="baseBranch" value="public" />
+</div>
 </div>
 
-<script>
-const $=s=>document.querySelector(s);
-const now=()=>new Date().toISOString();
 
-function showStatus(msg,type){
-  const el=$('#status');
-  el.textContent=msg;
-  el.className=`status ${type} show`;
-  setTimeout(()=>el.classList.remove('show'),5000);
-}
-
-function saveEnv(){
-  const env={
-    API_BASE:$('#apiBase').value.trim().replace(/\/+$/,''),
-    API_TOKEN:$('#apiToken').value.trim(),
-    DRYRUN_KEY:$('#dryrunKey').value.trim(),
-    BASE_BRANCH:$('#baseBranch').value.trim()||'public'
-  };
-  localStorage.setItem('ai2_env',JSON.stringify(env));
-  return env;
-}
-
-function loadSettings(){
-  const env=JSON.parse(localStorage.getItem('ai2_env')||'{}');
-  $('#apiBase').value=env.API_BASE||'https://datav.belocloud.com/ai2';
-  $('#apiToken').value=env.API_TOKEN||'';
-  $('#dryrunKey').value=env.DRYRUN_KEY||'';
-  $('#baseBranch').value=env.BASE_BRANCH||'public';
-
-  const prof=JSON.parse(localStorage.getItem('ai2_user')||'{}');
-  $('#userId').value=prof.userId||'u1';
-  $('#name').value=prof.name||'';
-  $('#email').value=prof.email||'';
-}
-
-$('#advancedToggle').onclick=()=>{
-  const adv=$('#advancedSettings');
-  adv.classList.toggle('show');
-  $('#advancedToggle').textContent=adv.classList.contains('show')?'⚙️ Hide Advanced':'⚙️ Advanced Settings';
-};
-
-$('#save').onclick=async()=>{
-  const btn=$('#save');
-  const btnText=$('#btnText');
-  const userId=$('#userId').value.trim();
-  
-  if(!userId){
-    showStatus('⚠️ User ID is required','err');
-    return;
-  }
-
-  btn.disabled=true;
-  btnText.innerHTML='<span class="spinner"></span>Signing in...';
-
-  try{
-    const env=saveEnv();
-    const user={
-      userId,
-      name:$('#name').value.trim(),
-      email:$('#email').value.trim(),
-      createdAt:now(),
-      updatedAt:now()
-    };
-    localStorage.setItem('ai2_user',JSON.stringify(user));
-    
-    showStatus('✅ Signed in successfully! Redirecting...','ok');
-    
-    setTimeout(()=>{
-      location.href=`./user.html?userId=${encodeURIComponent(userId)}`;
-    },1000);
-  }catch(e){
-    showStatus('❌ Error: '+e.message,'err');
-    btn.disabled=false;
-    btnText.textContent='Sign In & Continue';
-  }
-};
-
-// Load saved settings
-loadSettings();
-
-// Enter key support
-document.querySelectorAll('input').forEach(inp=>{
-  inp.addEventListener('keypress',e=>{
-    if(e.key==='Enter')$('#save').click();
-  });
-});
-</script>
-</body>
+<div class="grid" style="margin-top:10px">
+<div>
+<label>Username (userId)</label>
+<input id="userId" placeholder="u1" />
+</div>
+<div>
+<label>Password</label>
+<input id="password" type="password" placeholder="••••••••" />
+</div>
+<div>
+<label>Name</label>
+<input id="name" placeholder="Your name" />
+</div>
+<div>
+<label>Email</label>
 </html>
