@@ -14,6 +14,7 @@ const {
   inferStepOpFromDiff,
 } = require('../utils/diff');
 const { rlCheck } = require('../utils/rl');
+const { extractCombinedDiffFromBody } = require('../services/combinedDiffInput');
 
 function parseJSONSafe(buf) {
   try { return JSON.parse(String(buf || '{}')); } catch { return null; }
@@ -52,23 +53,33 @@ async function handleDiffDryRun(req, res) {
   const fwd = (req.headers['x-forwarded-for'] || '').split(',')[0].trim();
   const ip = fwd || (req.socket && req.socket.remoteAddress) || '0.0.0.0';
   const rl = rlCheck(ip, 'diff_dryrun', DRYRUN_RL_PER_MIN);
-  if (!rl.ok) return sendJSON(res, 429, { ok:false, error:'rate_limited', retry_after: rl.retry_after });
+  if (!rl.ok) {
+    return sendJSON(res, 429, { ok:false, error:'rate_limited', retry_after: rl.retry_after });
+  }
 
   let body;
-  try { body = await readJsonLimited(req, MAX_DIFF_BYTES); }
-  catch (e) { return sendJSON(res, e.code === 413 ? 413 : 400, { ok:false, error:String(e.code||'bad_request') }); }
+  try {
+    body = await readJsonLimited(req, MAX_DIFF_BYTES);
+  } catch (e) {
+    return sendJSON(
+      res,
+      e.code === 413 ? 413 : 400,
+      { ok:false, error:String(e.code || 'bad_request') }
+    );
+  }
 
-  const diff = sanitizeDiff((body && body.diff) || '');
-  if (!diff || typeof diff !== 'string') return sendJSON(res, 400, { ok:false, error:'missing_diff' });
-  if (Buffer.byteLength(diff, 'utf8') > MAX_DIFF_BYTES) return sendJSON(res, 413, { ok:false, error:'payload_too_large' });
-  if (looksBinaryDiff(diff)) return sendJSON(res, 400, { ok:false, error:'binary_diff_not_allowed' });
+  // 🔴 New: canonical combined diff extraction
+  const extracted = extractCombinedDiffFromBody(body, prefixes);
+  if (!extracted.ok) {
+    return sendJSON(res, extracted.code, { ok:false, error: extracted.error });
+  }
+  const diff = extracted.diff;
 
-  const pathsOk = stepPathsUnderRepo(diff, prefixes);
-  if (!pathsOk.ok) return sendJSON(res, 400, { ok:false, error:`diff_paths_invalid:${pathsOk.error}` });
-
-  const branch = String(body.base_branch || CANONICAL_BRANCH);
+  const branch = String((body && body.base_branch) || CANONICAL_BRANCH);
   const r = await gitDryRun(diff, branch);
-  if (!r.ok) return sendJSON(res, 400, { ok:false, error:r.error, detail:r.detail });
+  if (!r.ok) {
+    return sendJSON(res, 400, { ok:false, error:r.error, detail:r.detail });
+  }
 
   return sendJSON(res, 200, { ok:true });
 }
@@ -84,20 +95,26 @@ async function handleDiffSubmit(req, res) {
   const prefixes = allowedPrefixesFromAuth(auth);
 
   let body;
-  try { body = await readJsonLimited(req, MAX_DIFF_BYTES); }
-  catch (e) { return sendJSON(res, e.code === 413 ? 413 : 400, { ok:false, error:String(e.code||'bad_request') }); }
+  try {
+    body = await readJsonLimited(req, MAX_DIFF_BYTES);
+  } catch (e) {
+    return sendJSON(
+      res,
+      e.code === 413 ? 413 : 400,
+      { ok:false, error:String(e.code || 'bad_request') }
+    );
+  }
 
-  const diff = sanitizeDiff((body && body.diff) || '');
-  if (!diff) return sendJSON(res, 400, { ok:false, error:'missing_diff' });
-  if (Buffer.byteLength(diff, 'utf8') > MAX_DIFF_BYTES) return sendJSON(res, 413, { ok:false, error:'payload_too_large' });
-  if (looksBinaryDiff(diff)) return sendJSON(res, 400, { ok:false, error:'binary_diff_not_allowed' });
+  // New: canonical combined diff extraction
+  const extracted = extractCombinedDiffFromBody(body, prefixes);
+  if (!extracted.ok) {
+    return sendJSON(res, extracted.code, { ok:false, error: extracted.error });
+  }
+  const diff = extracted.diff;
 
-  const pathsOk = stepPathsUnderRepo(diff, prefixes);
-  if (!pathsOk.ok) return sendJSON(res, 400, { ok:false, error:`diff_paths_invalid:${pathsOk.error}` });
-
-  const branch  = String(body.base_branch || CANONICAL_BRANCH);
-  const message = String(body.message || 'Apply AI2 plan');
-  const idemVal = String(body.idempotency_key || '');
+  const branch  = String((body && body.base_branch) || CANONICAL_BRANCH);
+  const message = String((body && body.message) || 'Apply AI2 plan');
+  const idemVal = String((body && body.idempotency_key) || '');
   const reqInfo = { ip: (req.socket && req.socket.remoteAddress) || '' };
 
   // Server-side guard: repeat the dry-run; DO NOT enqueue on failure.
