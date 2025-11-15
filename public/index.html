@@ -1,4 +1,246 @@
 <!doctype html>
-<meta charset="utf-8">
-<title>AI2 Dev0</title>
-<h1>Hello</h1>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>AI2 Dev0</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      margin: 24px;
+      max-width: 960px;
+    }
+    h1 { margin: 0 0 12px; }
+    h2 { margin-top: 24px; }
+    .row { margin: 12px 0; }
+    label { display: block; margin-bottom: 8px; }
+    input[type="text"],
+    input[type="password"],
+    textarea {
+      width: 100%;
+      max-width: 100%;
+      box-sizing: border-box;
+      padding: 6px 8px;
+      font-family: inherit;
+      font-size: 14px;
+    }
+    button {
+      cursor: pointer;
+      padding: 6px 12px;
+      margin-right: 8px;
+    }
+    pre {
+      background: #111;
+      color: #eee;
+      padding: 10px;
+      overflow: auto;
+      max-height: 320px;
+      font-size: 12px;
+    }
+    .inline {
+      display: inline-block;
+      min-width: 220px;
+      margin-right: 16px;
+    }
+    small {
+      color: #666;
+      font-size: 11px;
+    }
+  </style>
+</head>
+<body>
+  <h1>AI2 Dev0</h1>
+  <p>
+    Minimal console for the <code>/ai2/plan</code> → <code>/ai2/diff_dryrun</code> → <code>/ai2/diff_submit</code> flow.
+  </p>
+
+  <div class="row">
+    <div class="inline">
+      <label>
+        ACTION_TOKEN
+        <input id="ai2-token" type="password" placeholder="paste ACTION_TOKEN">
+      </label>
+    </div>
+    <div class="inline">
+      <label>
+        X-Dryrun-Key <small>(optional, if configured)</small>
+        <input id="ai2-dryrun-key" type="password" placeholder="DRYRUN_KEY header value">
+      </label>
+    </div>
+  </div>
+
+  <div class="row">
+    <label>
+      Prompt
+      <input id="ai2-prompt" type="text"
+             value="refactor public/index.html so the hero title is 'AI2 Dev0'"
+             placeholder="Enter a plan prompt…">
+    </label>
+  </div>
+
+  <div class="row">
+    <button id="ai2-plan-btn">Plan (preview only)</button>
+    <button id="ai2-apply-btn">Plan + Dry-run + Apply</button>
+  </div>
+
+  <h2>Plan JSON</h2>
+  <pre id="ai2-plan">(no plan yet)</pre>
+
+  <h2>Combined diff</h2>
+  <pre id="ai2-diff">(no diff yet)</pre>
+
+  <h2>Log</h2>
+  <pre id="ai2-log">(idle)</pre>
+
+<script>
+  function setText(id, text) {
+    document.getElementById(id).textContent = text;
+  }
+
+  function getAuthHeaders() {
+    const token = document.getElementById('ai2-token').value.trim();
+    const headers = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      // CSRF hints expected by maybeBlockBrowserPost()
+      'X-Requested-With': 'ai2-ui',
+      'X-CSRF-Token': '1'
+    };
+    if (token) {
+      headers['Authorization'] = 'Bearer ' + token;
+    }
+    return headers;
+  }
+
+    async function callPlan(previewOnly) {
+      const prompt = document.getElementById('ai2-prompt').value;
+      const logEl  = document.getElementById('ai2-log');
+
+      setText('ai2-plan', '(waiting for planner…)');
+      setText('ai2-diff', '(waiting for planner…)');
+      setText('ai2-log',  '(planning…)');
+
+      const headers = getAuthHeaders();
+      const body = {
+        prompt,
+        preview_only: previewOnly,
+        return_combined_diff: true
+      };
+
+      try {
+        const res = await fetch('/ai2/plan', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body)
+        });
+
+        let data = {};
+        try { data = await res.json(); } catch { data = {}; }
+
+        const plan = data.plan || null;
+        setText('ai2-plan', JSON.stringify(plan || data, null, 2));
+
+        const combined =
+          data.combined_diff ||
+          (plan && plan.combined_diff) ||
+          '(no combined_diff returned)';
+
+        setText('ai2-diff', combined);
+
+        if (!res.ok || !data.ok) {
+          setText('ai2-log', 'Plan error: ' + (data.error || res.status));
+          return null;
+        }
+
+        setText('ai2-log', 'Plan OK' + (previewOnly ? ' (preview_only)' : ''));
+        return data;
+      } catch (e) {
+        logEl.textContent = 'Plan request failed: ' + e;
+        return null;
+      }
+    }
+
+    async function handlePlanClick() {
+      await callPlan(true);
+    }
+
+    async function handleApplyClick() {
+      const token = document.getElementById('ai2-token').value.trim();
+      const dryrunKey = document.getElementById('ai2-dryrun-key').value.trim();
+      const logEl = document.getElementById('ai2-log');
+
+      // 1) Plan (preview_only = false, so planner can optimize differently if it wants)
+      const planResp = await callPlan(false);
+      if (!planResp || !planResp.ok || !planResp.plan) {
+        return;
+      }
+      const plan = planResp.plan;
+
+      // 2) Dry-run
+      const headers = getAuthHeaders();
+      if (dryrunKey) {
+        headers['X-Dryrun-Key'] = dryrunKey;
+      }
+
+      setText('ai2-log', 'Running /ai2/diff_dryrun…');
+
+      try {
+        const dryRes = await fetch('/ai2/diff_dryrun', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ plan })
+        });
+        let dryData = {};
+        try { dryData = await dryRes.json(); } catch { dryData = {}; }
+
+        if (!dryRes.ok || !dryData.ok) {
+          setText('ai2-log',
+            'Dry-run failed: ' +
+            (dryData.detail || dryData.error || dryRes.status)
+          );
+          return;
+        }
+      } catch (e) {
+        setText('ai2-log', 'Dry-run request failed: ' + e);
+        return;
+      }
+
+      // 3) Submit
+      setText('ai2-log', 'Dry-run OK; submitting patch via /ai2/diff_submit…');
+
+      try {
+        const submitRes = await fetch('/ai2/diff_submit', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ plan })
+        });
+        let submitData = {};
+        try { submitData = await submitRes.json(); } catch { submitData = {}; }
+
+        if (!submitRes.ok || !submitData.ok) {
+          setText('ai2-log',
+            'Submit failed: ' +
+            (submitData.detail || submitData.error || submitRes.status)
+          );
+          return;
+        }
+
+        const jobId = submitData.enqueued && submitData.enqueued.queued;
+        setText(
+          'ai2-log',
+          'Apply OK.' + (jobId ? ' Enqueued job: ' + jobId : '')
+        );
+      } catch (e) {
+        setText('ai2-log', 'Submit request failed: ' + e);
+      }
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('ai2-plan-btn')
+        .addEventListener('click', handlePlanClick);
+      document.getElementById('ai2-apply-btn')
+        .addEventListener('click', handleApplyClick);
+    });
+  </script>
+</body>
+</html>
