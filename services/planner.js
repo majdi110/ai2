@@ -42,6 +42,7 @@ function buildPlannerSystemPrompt() {
     'Rules:',
     `- All file paths MUST be under ${ROOT} and obey the server allowed prefixes.`,
     "- Unified diffs MUST start with 'diff --git ' and be valid git-format patches.",
+    '- Hunk headers (@@ -a,b +c,d @@) MUST match the number of lines in each hunk (context plus added/removed lines).',
     '- Prefer a SINGLE patch step when possible.',
     '- Keep total diff size < 200 KB.',
     '- NEVER write outside allowed prefixes.',
@@ -55,10 +56,10 @@ function buildPlannerSystemPrompt() {
     '',
     'Examples:',
     'EXAMPLE_CREATE:',
-    '{ "schema":1,"id":"ex-create-1","status":"planned","goal":"Create a welcome page","constraints":{"base_branch":"'+CANONICAL_BRANCH+'","allowed_ops":["create","modify","delete"],"root_dir":"'+ROOT+'"},"steps":[{ "type":"patch","op":"create","base_branch":"'+CANONICAL_BRANCH+'","message":"Add welcome page","diff":"diff --git a/public/welcome.html b/public/welcome.html\\nnew file mode 100644\\nindex 0000000..e69de29\\n--- /dev/null\\n+++ b/public/welcome.html\\n@@ -0,0 +1,5 @@\\n+<!doctype html>\\n+<title>Welcome</title>\\n+<h1>Welcome</h1>\\n+<p>Hello!</p>\\n+" }],"combined_diff":null,"artifacts":null,"telemetry":null }',
+    '{ "schema":1,"id":"ex-create-1","status":"planned","goal":"Create a welcome page","constraints":{"base_branch":"'+CANONICAL_BRANCH+'","allowed_ops":["create","modify","delete"],"root_dir":"'+ROOT+'"},"steps":[{ "type":"patch","op":"create","base_branch":"'+CANONICAL_BRANCH+'","message":"Add welcome page","diff":"diff --git a/public/welcome.html b/public/welcome.html\\nnew file mode 100644\\nindex 0000000..e69de29\\n--- /dev/null\\n+++ b/public/welcome.html\\n@@ -0,0 +1,4 @@\\n+<!doctype html>\\n+<title>Welcome</title>\\n+<h1>Welcome</h1>\\n+<p>Hello!</p>\\n+" }],"combined_diff":null,"artifacts":null,"telemetry":null }',
     '',
     'EXAMPLE_MODIFY:',
-    '{ "schema":1,"id":"ex-mod-1","status":"planned","goal":"Update title in index.html","constraints":{"base_branch":"'+CANONICAL_BRANCH+'","allowed_ops":["create","modify","delete"],"root_dir":"'+ROOT+'"},"steps":[{ "type":"patch","op":"modify","base_branch":"'+CANONICAL_BRANCH+'","message":"Change title to AI2 Demo","diff":"diff --git a/public/index.html b/public/index.html\\nindex abc1234..def5678 100644\\n--- a/public/index.html\\n+++ b/public/index.html\\n@@ -1,5 +1,5 @@\\n <!doctype html>\\n <meta charset=\\"utf-8\\">\\n-<title>Old</title>\\n+<title>AI2 Demo</title>\\n <h1>Hello</h1>\\n" }],"combined_diff":null,"artifacts":null,"telemetry":null }',
+    '{ "schema":1,"id":"ex-mod-1","status":"planned","goal":"Update title in index.html","constraints":{"base_branch":"'+CANONICAL_BRANCH+'","allowed_ops":["create","modify","delete"],"root_dir":"'+ROOT+'"},"steps":[{ "type":"patch","op":"modify","base_branch":"'+CANONICAL_BRANCH+'","message":"Change title to AI2 Demo","diff":"diff --git a/public/index.html b/public/index.html\\nindex abc1234..def5678 100644\\n--- a/public/index.html\\n+++ b/public/index.html\\n@@ -1,4 +1,4 @@\\n <!doctype html>\\n <meta charset=\\"utf-8\\">\\n-<title>Old</title>\\n+<title>AI2 Demo</title>\\n <h1>Hello</h1>\\n" }],"combined_diff":null,"artifacts":null,"telemetry":null }',
     '',
     'EXAMPLE_DELETE:',
     '{ "schema":1,"id":"ex-del-1","status":"planned","goal":"Remove deprecated file","constraints":{"base_branch":"'+CANONICAL_BRANCH+'","allowed_ops":["create","modify","delete"],"root_dir":"'+ROOT+'"},"steps":[{ "type":"patch","op":"delete","base_branch":"'+CANONICAL_BRANCH+'","message":"Remove old file","diff":"diff --git a/public/old.txt b/public/old.txt\\ndeleted file mode 100644\\nindex 1a2b3c4..0000000\\n--- a/public/old.txt\\n+++ /dev/null\\n@@ -1,1 +0,0 @@\\n-legacy content\\n" }],"combined_diff":null,"artifacts":null,"telemetry":null }',
@@ -78,7 +79,7 @@ function buildPlannerSystemPrompt() {
 index abc..def 100644
 --- a/public/index.html
 +++ b/public/index.html
-@@ -1,5 +1,5 @@
+@@ -1,4 +1,4 @@
  <!doctype html>
  <html lang=\"en\">
 -<title>Old</title>
@@ -98,7 +99,7 @@ new file mode 100644
 index 0000000..e69de29
 --- /dev/null
 +++ b/public/about.html
-@@ -0,0 +1,6 @@
+@@ -0,0 +1,5 @@
 +<!doctype html>
 +<meta charset=\"utf-8\">
 +<title>About - AI2 Demo</title>
@@ -138,10 +139,10 @@ index 0123456..0000000
   return base.join('\n');
 }
 
-
 function injectContextIntoPrompt(userText, contextBlock) {
   return contextBlock ? (`[CONTEXT FOLLOWS]\n${contextBlock}\n\n[REQUEST]\n${userText}`) : userText;
 }
+
 async function callOpenAIPlan(userPrompt) {
   const system = buildPlannerSystemPrompt();
   const body = {
@@ -166,6 +167,7 @@ async function callOpenAIPlan(userPrompt) {
   const usage = j.usage || j.output?.[0]?.usage || null;
   return { plan: planObj, usage };
 }
+
 async function planWithRetry(effPrompt, sseEmit) {
   if (!plannerHealthy()) {
     if (sseEmit) sseEmit('planner_cb_tripped', { window_ms: 60_000 });

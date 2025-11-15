@@ -13,7 +13,9 @@ function sanitizeHeaders(diff) {
   return String(diff)
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
-    .replace(/^(\+\+\+|---)b\//mg, '$1 b/'); // "+++ b/..." / "--- b/..."
+    // ensure "+++ b/..." / "--- b/..." have a space before b/
+    .replace(/^(\+\+\+|---)b\//mg, '$1 b/');
+    // NOTE: do NOT touch @@ hunk headers anymore; planner already emits valid ones
 }
 
 /**
@@ -40,11 +42,36 @@ function extractCombinedDiffFromBody(body, prefixes) {
 
   let raw;
 
+  // ----- 1) Fast-path: plan.combined_diff (already normalized by validateAndFinalizePlan) -----
   if (hasPlan) {
     const plan = body.plan;
+
     if (typeof plan.combined_diff === 'string' && plan.combined_diff.trim()) {
-      raw = plan.combined_diff;
-    } else if (Array.isArray(plan.steps)) {
+      const diff = String(plan.combined_diff);
+
+      if (!diff.trim()) {
+        return { ok: false, code: 400, error: 'empty_diff' };
+      }
+
+      if (looksBinaryDiff(diff)) {
+        return { ok: false, code: 400, error: 'binary_diff_not_allowed' };
+      }
+
+      const pathsOk = stepPathsUnderRepo(diff, prefixes);
+      if (!pathsOk.ok) {
+        return {
+          ok: false,
+          code: 400,
+          error: `diff_paths_invalid:${pathsOk.error || 'unknown'}`
+        };
+      }
+
+      // IMPORTANT: return early, without extra normalization
+      return { ok: true, diff };
+    }
+
+    // No combined_diff, but we *do* have steps: build combined now
+    if (Array.isArray(plan.steps)) {
       const combined = buildCombinedDiffFromSteps(plan.steps);
       if (!combined || !combined.trim()) {
         return { ok: false, code: 400, error: 'plan_has_no_diff' };
@@ -56,12 +83,13 @@ function extractCombinedDiffFromBody(body, prefixes) {
   } else if (hasCombined) {
     raw = body.combined_diff;
   } else if (hasDiffField) {
-    // Backwards compatible with your current API
+    // Backwards compatible with legacy { diff: "..." } payloads
     raw = body.diff;
   } else {
     return { ok: false, code: 400, error: 'missing_diff' };
   }
 
+  // ----- 2) Non-plan / legacy flows go through sanitize + normalize -----
   let diff = sanitizeHeaders(raw);
   diff = normalizeDiff(diff);
 
@@ -84,5 +112,6 @@ function extractCombinedDiffFromBody(body, prefixes) {
 
   return { ok: true, diff };
 }
+
 
 module.exports = { extractCombinedDiffFromBody };

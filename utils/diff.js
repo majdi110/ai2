@@ -2,9 +2,25 @@
 'use strict';
 const { ALLOWED_PATH_PREFIXES } = require('../config/constants');
 
-function normalizeDiff(raw) {
-  if (typeof raw !== 'string') return raw;
-  return raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+function normalizeDiff(diff) {
+  if (!diff) return '';
+  let s = String(diff);
+
+  // 1) Normalize line endings to LF
+  s = s.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+  // 2) Ensure "+++ b/..." / "--- b/..." have a space before b/
+  s = s.replace(/^(\+\+\+|---)b\//mg, '$1 b/');
+
+  // 3) Ensure the patch ends with a newline so the last hunk isn't truncated
+  if (!s.endsWith('\n')) s += '\n';
+
+  // IMPORTANT:
+  // - Do NOT trim() or trimEnd() — that would drop blank context lines
+  //   and corrupt @@ -a,b +c,d @@ counts.
+  // - Do NOT touch "@@ ..." hunk headers here.
+
+  return s;
 }
 function looksBinaryDiff(diff) {
   return /^(?:GIT binary patch|literal \d+)/m.test(String(diff||''));
