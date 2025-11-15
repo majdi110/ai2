@@ -112,135 +112,142 @@
     return headers;
   }
 
-    async function callPlan(previewOnly) {
-      const prompt = document.getElementById('ai2-prompt').value;
-      const logEl  = document.getElementById('ai2-log');
+  // Generate a fresh idempotency key per plan request
+  function newIdemKey() {
+    return 'ui-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+  }
 
-      setText('ai2-plan', '(waiting for planner…)');
-      setText('ai2-diff', '(waiting for planner…)');
-      setText('ai2-log',  '(planning…)');
+  async function callPlan(previewOnly) {
+    const prompt = document.getElementById('ai2-prompt').value;
+    const logEl  = document.getElementById('ai2-log');
 
-      const headers = getAuthHeaders();
-      const body = {
-        prompt,
-        preview_only: previewOnly,
-        return_combined_diff: true
-      };
+    setText('ai2-plan', '(waiting for planner…)');
+    setText('ai2-diff', '(waiting for planner…)');
+    setText('ai2-log',  '(planning…)');
 
-      try {
-        const res = await fetch('/ai2/plan', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(body)
-        });
+    const headers = getAuthHeaders();
+    headers['X-Idempotency-Key'] = newIdemKey();  // ← added
 
-        let data = {};
-        try { data = await res.json(); } catch { data = {}; }
+    const body = {
+      prompt,
+      preview_only: previewOnly,
+      return_combined_diff: true
+    };
 
-        const plan = data.plan || null;
-        setText('ai2-plan', JSON.stringify(plan || data, null, 2));
+    try {
+      const res = await fetch('/ai2/plan', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body)
+      });
 
-        const combined =
-          data.combined_diff ||
-          (plan && plan.combined_diff) ||
-          '(no combined_diff returned)';
+      let data = {};
+      try { data = await res.json(); } catch { data = {}; }
 
-        setText('ai2-diff', combined);
+      const plan = data.plan || null;
+      setText('ai2-plan', JSON.stringify(plan || data, null, 2));
 
-        if (!res.ok || !data.ok) {
-          setText('ai2-log', 'Plan error: ' + (data.error || res.status));
-          return null;
-        }
+      const combined =
+        data.combined_diff ||
+        (plan && plan.combined_diff) ||
+        '(no combined_diff returned)';
 
-        setText('ai2-log', 'Plan OK' + (previewOnly ? ' (preview_only)' : ''));
-        return data;
-      } catch (e) {
-        logEl.textContent = 'Plan request failed: ' + e;
+      setText('ai2-diff', combined);
+
+      if (!res.ok || !data.ok) {
+        setText('ai2-log', 'Plan error: ' + (data.error || res.status));
         return null;
       }
+
+      setText('ai2-log', 'Plan OK' + (previewOnly ? ' (preview_only)' : ''));
+      return data;
+    } catch (e) {
+      logEl.textContent = 'Plan request failed: ' + e;
+      return null;
+    }
+  }
+
+  async function handlePlanClick() {
+    await callPlan(true);
+  }
+
+  async function handleApplyClick() {
+    const token = document.getElementById('ai2-token').value.trim();
+    const dryrunKey = document.getElementById('ai2-dryrun-key').value.trim();
+    const logEl = document.getElementById('ai2-log');
+
+    // 1) Plan (preview_only = false, so planner can optimize differently if it wants)
+    const planResp = await callPlan(false);
+    if (!planResp || !planResp.ok || !planResp.plan) {
+      return;
+    }
+    const plan = planResp.plan;
+
+    // 2) Dry-run
+    const headers = getAuthHeaders();
+    if (dryrunKey) {
+      headers['X-Dryrun-Key'] = dryrunKey;
     }
 
-    async function handlePlanClick() {
-      await callPlan(true);
-    }
+    setText('ai2-log', 'Running /ai2/diff_dryrun…');
 
-    async function handleApplyClick() {
-      const token = document.getElementById('ai2-token').value.trim();
-      const dryrunKey = document.getElementById('ai2-dryrun-key').value.trim();
-      const logEl = document.getElementById('ai2-log');
+    try {
+      const dryRes = await fetch('/ai2/diff_dryrun', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ plan })
+      });
+      let dryData = {};
+      try { dryData = await dryRes.json(); } catch { dryData = {}; }
 
-      // 1) Plan (preview_only = false, so planner can optimize differently if it wants)
-      const planResp = await callPlan(false);
-      if (!planResp || !planResp.ok || !planResp.plan) {
-        return;
-      }
-      const plan = planResp.plan;
-
-      // 2) Dry-run
-      const headers = getAuthHeaders();
-      if (dryrunKey) {
-        headers['X-Dryrun-Key'] = dryrunKey;
-      }
-
-      setText('ai2-log', 'Running /ai2/diff_dryrun…');
-
-      try {
-        const dryRes = await fetch('/ai2/diff_dryrun', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({ plan })
-        });
-        let dryData = {};
-        try { dryData = await dryRes.json(); } catch { dryData = {}; }
-
-        if (!dryRes.ok || !dryData.ok) {
-          setText('ai2-log',
-            'Dry-run failed: ' +
-            (dryData.detail || dryData.error || dryRes.status)
-          );
-          return;
-        }
-      } catch (e) {
-        setText('ai2-log', 'Dry-run request failed: ' + e);
-        return;
-      }
-
-      // 3) Submit
-      setText('ai2-log', 'Dry-run OK; submitting patch via /ai2/diff_submit…');
-
-      try {
-        const submitRes = await fetch('/ai2/diff_submit', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({ plan })
-        });
-        let submitData = {};
-        try { submitData = await submitRes.json(); } catch { submitData = {}; }
-
-        if (!submitRes.ok || !submitData.ok) {
-          setText('ai2-log',
-            'Submit failed: ' +
-            (submitData.detail || submitData.error || submitRes.status)
-          );
-          return;
-        }
-
-        const jobId = submitData.enqueued && submitData.enqueued.queued;
-        setText(
-          'ai2-log',
-          'Apply OK.' + (jobId ? ' Enqueued job: ' + jobId : '')
+      if (!dryRes.ok || !dryData.ok) {
+        setText('ai2-log',
+          'Dry-run failed: ' +
+          (dryData.detail || dryData.error || dryRes.status)
         );
-      } catch (e) {
-        setText('ai2-log', 'Submit request failed: ' + e);
+        return;
       }
+    } catch (e) {
+      setText('ai2-log', 'Dry-run request failed: ' + e);
+      return;
     }
 
-    window.addEventListener('DOMContentLoaded', () => {
-      document.getElementById('ai2-plan-btn')
-        .addEventListener('click', handlePlanClick);
-      document.getElementById('ai2-apply-btn')
-        .addEventListener('click', handleApplyClick);
-    });
-  </script>
+    // 3) Submit
+    setText('ai2-log', 'Dry-run OK; submitting patch via /ai2/diff_submit…');
+
+    try {
+      const submitRes = await fetch('/ai2/diff_submit', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ plan })
+      });
+      let submitData = {};
+      try { submitData = await submitRes.json(); } catch { submitData = {}; }
+
+      if (!submitRes.ok || !submitData.ok) {
+        setText('ai2-log',
+          'Submit failed: ' +
+          (submitData.detail || submitData.error || submitRes.status)
+        );
+        return;
+      }
+
+      const jobId = submitData.enqueued && submitData.enqueued.queued;
+      setText(
+        'ai2-log',
+        'Apply OK.' + (jobId ? ' Enqueued job: ' + jobId : '')
+      );
+    } catch (e) {
+      setText('ai2-log', 'Submit request failed: ' + e);
+    }
+  }
+
+  window.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('ai2-plan-btn')
+      .addEventListener('click', handlePlanClick);
+    document.getElementById('ai2-apply-btn')
+      .addEventListener('click', handleApplyClick);
+  });
+</script>
 </body>
 </html>
